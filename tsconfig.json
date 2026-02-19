@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "baseUrl": ".",
+    "paths": {
+      "#core": ["src/core/index.ts"],
+      "#core/*": ["src/core/*"],
+      "#review": ["src/review/index.ts"],
+      "#review/*": ["src/review/*"],
+      "#integrations/github": ["src/integrations/github/index.ts"],
+      "#integrations/github/*": ["src/integrations/github/*"],
+      "#integrations/gitlab": ["src/integrations/gitlab/index.ts"],
+      "#integrations/gitlab/*": ["src/integrations/gitlab/*"],
+      "#integrations/notify": ["src/integrations/notify/index.ts"],
+      "#integrations/notify/*": ["src/integrations/notify/*"]
+    },
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noUncheckedIndexedAccess": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"]
+}
