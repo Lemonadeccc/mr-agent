@@ -55,6 +55,15 @@ export interface PullRequestReviewInput {
   deletions: number;
   changedFilesCount: number;
   changedFiles: ReviewFileForAI[];
+  customRules?: string[];
+  feedbackSignals?: string[];
+  ciChecks?: Array<{
+    name: string;
+    status: string;
+    conclusion: string;
+    detailsUrl?: string;
+    summary?: string;
+  }>;
   processGuidelines?: Array<{
     path: string;
     content: string;

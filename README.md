@@ -12,7 +12,11 @@
 - PR 合并后自动评审（`report`）
 - PR 评论命令触发（`/ai-review`）
 - PR 问答命令（`/ask <问题>`）
+- PR CI 诊断命令（`/checks [附加问题]`）
+- PR 测试生成命令（`/generate_tests [重点]`）
+- PR Changelog 命令（`/changelog [重点]`、`/changelog --apply [重点]`）
 - PR 描述生成命令（`/describe`、`/describe --apply`）
+- PR 反馈学习命令（`/feedback resolved|dismissed|up|down [备注]`）
 - Webhook Header 指定 `report/comment`
 - Issue 创建/编辑时流程预检（GitHub）
 - PR 创建/编辑/同步时合并前流程预检（GitHub）
@@ -40,6 +44,9 @@
 - `enforce` 模式可写 GitHub Check（可接 branch protection）
 - 疑似密钥泄露提示（基于 diff 的轻量规则扫描）
 - 自动标签（bugfix/feature/refactor/docs/security 等）
+- 报告内 Mermaid 变更结构图（按目录/文件可视化）
+- 反馈学习信号（`/feedback` 与 review thread `resolved/unresolved`）
+- Changelog 自动写回（`/changelog --apply`，可直接更新仓库文件）
 - 超时/重试与错误分层（Webhook 鉴权错误、请求错误）
 - `.github/.gitlab` 模板/流程文件识别（workflow/template/CODEOWNERS/CONTRIBUTING）并给出流程建议
 - 外部 webhook 调用失败时返回结构化错误（含 `type/status/path/method/timestamp`）
@@ -73,6 +80,7 @@ npm run dev
    - `Pull request`（`opened` / `edited` / `synchronize` / `closed`）
    - `Issues`（`opened` / `edited`）
    - `Issue comment`
+   - `Pull request review thread`（`resolved` / `unresolved`，用于反馈学习）
 4. Webhook URL：
 
 ```text
@@ -86,6 +94,11 @@ https://<your-domain>/api/github/webhooks
 /ai-review report
 /ai-review comment
 /ask 这个函数有并发风险吗？
+/checks 为什么这个 CI 失败？
+/generate_tests 并发与异常路径
+/changelog 用户可见行为变化
+/changelog --apply 用户可见行为变化
+/feedback resolved 这个建议很实用
 /describe
 /describe --apply
 ```
@@ -100,7 +113,7 @@ Webhook URL：
 https://<your-domain>/github/trigger
 ```
 
-事件：`Pull request` + `Issues` + `Issue comment`
+事件：`Pull request` + `Issues` + `Issue comment` + `Pull request review thread`
 
 Secret：`GITHUB_WEBHOOK_SECRET`
 
@@ -121,7 +134,27 @@ https://<your-domain>/gitlab/trigger
 - `x-gitlab-token`: 仅当配置 `GITLAB_WEBHOOK_SECRET` 时用于 webhook 鉴权
 - 可选：`x-push-url` / `x-qwx-robot-url`
 
+事件建议订阅：
+
+- `Merge request`（open/reopen/update/merge）
+- `Note`（在 MR 评论里触发 `/ai-review`、`/ask`、`/checks`、`/describe`、`/generate_tests`、`/changelog`、`/feedback`）
+
 兼容行为：当未配置 `GITLAB_WEBHOOK_SECRET` 时，`x-gitlab-token` 仍可兼容作为 API token 使用。
+
+GitLab MR 评论命令示例：
+
+```text
+/ai-review
+/ai-review report
+/ask 这个变更会引入并发问题吗？
+/checks 为什么 pipeline 失败？
+/generate_tests 边界与回归场景
+/changelog 用户可见行为变化
+/changelog --apply 用户可见行为变化
+/describe
+/describe --apply
+/feedback down 这条建议噪音偏高
+```
 
 ## Webhook 错误响应
 
@@ -174,6 +207,21 @@ OPENAI_MODEL=gpt-4.1-mini
 - 调小：如果你需要更快允许同一 PR 合并事件再次触发自动评审，可调到 `1h~6h`（如 `3600000` / `21600000`）。
 - 注意：该变量只影响 `merged + report` 自动触发；手动评论命令触发（`/ai-review ...`）仍使用短窗口去重策略。
 
+### `GITHUB_FEEDBACK_SIGNAL_TTL_MS`（反馈学习窗口）
+
+- 作用：控制评审反馈信号（`/feedback` + review thread resolved/unresolved）保留时长（毫秒）。
+- 推荐值：`2592000000`（30 天）。
+- 调大：团队评审节奏慢、希望长期记忆偏好，可设为 `60~90` 天。
+- 调小：规则变化快、希望更快“遗忘”历史偏好，可设为 `7~14` 天。
+
+### GitLab 侧常用调参
+
+- `GITLAB_MERGED_DEDUPE_TTL_MS`：`merged + report` 去重窗口（默认 24 小时）。
+- `GITLAB_INCREMENTAL_STATE_TTL_MS`：增量评审状态缓存窗口（默认 7 天）。
+- `GITLAB_FEEDBACK_SIGNAL_TTL_MS`：反馈学习信号保留窗口（默认 30 天）。
+- `GITLAB_POLICY_CONFIG_CACHE_TTL_MS`：`.mr-agent.yml` 策略缓存窗口（默认 5 分钟）。
+- `GITLAB_CHANGELOG_PATH`：`/changelog --apply` 写回路径（默认 `CHANGELOG.md`）。
+
 更多变量见：`.env.example`
 
 ## 仓库策略配置（`.mr-agent.yml`）
@@ -207,8 +255,18 @@ review:
   onSynchronize: true
   describeEnabled: true
   describeAllowApply: false
+  checksCommandEnabled: true
+  includeCiChecks: true
+  askCommandEnabled: true
+  generateTestsCommandEnabled: true
+  changelogCommandEnabled: true
+  changelogAllowApply: false
+  feedbackCommandEnabled: true
   secretScanEnabled: true
   autoLabelEnabled: true
+  customRules:
+    - 所有公开 API 必须提供类型注释
+    - 不允许新增 any 类型
 ```
 
 说明：
@@ -223,8 +281,16 @@ review:
   - `enabled/mode/onOpened/onEdited/onSynchronize`：控制 PR 事件是否自动触发 AI 评审及模式。
   - `describeEnabled`：控制 `/describe` 是否可用。
   - `describeAllowApply`：控制 `/describe --apply` 是否允许直接改写 PR 描述。
+  - `checksCommandEnabled`：控制 `/checks` 是否可用。
+  - `askCommandEnabled`：控制 `/ask` 是否可用。
+  - `generateTestsCommandEnabled`：控制 `/generate_tests` 是否可用。
+  - `changelogCommandEnabled`：控制 `/changelog` 是否可用。
+  - `changelogAllowApply`：控制 `/changelog --apply` 是否允许直接写回仓库 changelog。
+  - `feedbackCommandEnabled`：控制 `/feedback` 是否可用。
+  - `includeCiChecks`：是否把 CI 检查结果带入 AI 上下文。
   - `secretScanEnabled`：控制是否扫描 diff 中疑似密钥泄露并发布安全提示评论。
   - `autoLabelEnabled`：控制是否根据变更内容自动追加 PR 标签。
+  - `customRules`：团队自定义评审规则（自然语言），在评审与问答中都会强制纳入。
 
 ## 多 Provider 配置示例
 

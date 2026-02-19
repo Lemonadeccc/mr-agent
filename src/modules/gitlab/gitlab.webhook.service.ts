@@ -4,8 +4,8 @@ import { z } from "zod";
 
 import { BadWebhookRequestError, WebhookAuthError } from "#core";
 import {
-  runGitLabReview,
-  type GitLabMrWebhookBody,
+  runGitLabWebhook,
+  type GitLabWebhookBody,
 } from "#integrations/gitlab";
 import {
   formatLogMessage,
@@ -14,6 +14,7 @@ import {
 
 const gitlabWebhookPayloadSchema = z.object({
   object_kind: z.string().optional(),
+  event_type: z.string().optional(),
   user: z
     .object({
       username: z.string().optional(),
@@ -25,16 +26,8 @@ const gitlabWebhookPayloadSchema = z.object({
     web_url: z.string().min(1),
     path_with_namespace: z.string().optional(),
   }),
-  object_attributes: z.object({
-    action: z.string().optional(),
-    state: z.string().optional(),
-    iid: z.number().int().positive(),
-    url: z.string().min(1),
-    title: z.string().min(1),
-    description: z.string().optional(),
-    source_branch: z.string().min(1),
-    target_branch: z.string().min(1),
-  }),
+  object_attributes: z.record(z.unknown()),
+  merge_request: z.record(z.unknown()).optional(),
 });
 
 @Injectable()
@@ -51,7 +44,7 @@ export class GitlabWebhookService {
   };
 
   async handleTrigger(params: {
-    payload: GitLabMrWebhookBody | undefined;
+    payload: GitLabWebhookBody | undefined;
     headers: Record<string, string | string[] | undefined>;
   }): Promise<{ ok: boolean; message: string }> {
     const payload = parseGitLabPayload(params.payload);
@@ -69,7 +62,7 @@ export class GitlabWebhookService {
       normalizedHeaders["x-gitlab-api-token"] = normalizedHeaders["x-gitlab-token"];
     }
 
-    return runGitLabReview({
+    return runGitLabWebhook({
       payload,
       headers: normalizedHeaders,
       logger: this.serviceLogger,
@@ -77,10 +70,10 @@ export class GitlabWebhookService {
   }
 }
 
-function parseGitLabPayload(payload: unknown): GitLabMrWebhookBody {
+function parseGitLabPayload(payload: unknown): GitLabWebhookBody {
   const parsed = gitlabWebhookPayloadSchema.safeParse(payload);
   if (parsed.success) {
-    return parsed.data as GitLabMrWebhookBody;
+    return parsed.data as GitLabWebhookBody;
   }
 
   const firstIssue = parsed.error.issues[0];

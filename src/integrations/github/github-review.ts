@@ -40,6 +40,9 @@ const MAX_GUIDELINES_PER_DIRECTORY = 8;
 const MAX_GUIDELINE_CACHE_ENTRIES = 500;
 const DEFAULT_INCREMENTAL_STATE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const MAX_INCREMENTAL_STATE_ENTRIES = 2_000;
+const DEFAULT_FEEDBACK_SIGNAL_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+const MAX_FEEDBACK_SIGNALS = 80;
+const MAX_FEEDBACK_CACHE_ENTRIES = 1_000;
 
 type ProcessGuideline = { path: string; content: string };
 type SecretFinding = {
@@ -51,9 +54,11 @@ type SecretFinding = {
 
 type ProcessGuidelineCacheEntry = ExpiringCacheEntry<ProcessGuideline[]>;
 type IncrementalHeadCacheEntry = ExpiringCacheEntry<string>;
+type FeedbackSignalCacheEntry = ExpiringCacheEntry<string[]>;
 
 const guidelineCache = new Map<string, ProcessGuidelineCacheEntry>();
 const incrementalHeadCache = new Map<string, IncrementalHeadCacheEntry>();
+const feedbackSignalCache = new Map<string, FeedbackSignalCacheEntry>();
 
 export interface LoggerLike {
   info(metadata: unknown, message: string): void;
@@ -85,6 +90,19 @@ export interface GitHubCompareCommitsResponse {
   files?: GitHubPullFile[];
 }
 
+export interface GitHubCheckRunSummary {
+  name?: string;
+  status?: string;
+  conclusion?: string | null;
+  details_url?: string | null;
+  html_url?: string | null;
+  output?: {
+    title?: string | null;
+    summary?: string | null;
+    text?: string | null;
+  };
+}
+
 export interface GitHubCheckRunCreateParams {
   [key: string]: unknown;
   owner: string;
@@ -113,6 +131,7 @@ export interface GitHubRepositoryContentFile {
   path?: string;
   encoding?: string;
   content?: string;
+  sha?: string;
 }
 
 export type GitHubPullsListFilesMethod = (params: {
@@ -142,6 +161,16 @@ export interface MinimalGitHubOctokit {
     }): Promise<{
       data: GitHubCompareCommitsResponse;
     }>;
+    createOrUpdateFileContents?(params: {
+      [key: string]: unknown;
+      owner: string;
+      repo: string;
+      path: string;
+      message: string;
+      content: string;
+      sha?: string;
+      branch?: string;
+    }): Promise<unknown>;
   };
   pulls: {
     get(params: {
@@ -190,6 +219,15 @@ export interface MinimalGitHubOctokit {
   };
   checks?: {
     create(params: GitHubCheckRunCreateParams): Promise<unknown>;
+    listForRef?(params: {
+      [key: string]: unknown;
+      owner: string;
+      repo: string;
+      ref: string;
+      per_page?: number;
+    }): Promise<{
+      data: { check_runs?: GitHubCheckRunSummary[] };
+    }>;
   };
   paginate(
     method: GitHubPullsListFilesMethod,
@@ -214,6 +252,8 @@ interface GitHubReviewRunParams {
   mode: ReviewMode;
   trigger: ReviewTrigger;
   dedupeSuffix?: string;
+  customRules?: string[];
+  includeCiChecks?: boolean;
   enableSecretScan?: boolean;
   enableAutoLabel?: boolean;
   throwOnError?: boolean;
@@ -234,6 +274,22 @@ interface GitHubAskRunParams {
   question: string;
   trigger: ReviewTrigger;
   dedupeSuffix?: string;
+  customRules?: string[];
+  includeCiChecks?: boolean;
+  commentTitle?: string;
+  displayQuestion?: string;
+  throwOnError?: boolean;
+}
+
+interface GitHubChangelogRunParams {
+  context: GitHubReviewContext;
+  pullNumber: number;
+  trigger: ReviewTrigger;
+  focus?: string;
+  apply?: boolean;
+  dedupeSuffix?: string;
+  customRules?: string[];
+  includeCiChecks?: boolean;
   throwOnError?: boolean;
 }
 
@@ -258,6 +314,8 @@ export async function runGitHubReview(
     mode,
     trigger,
     dedupeSuffix,
+    customRules = [],
+    includeCiChecks = true,
     enableSecretScan = true,
     enableAutoLabel = true,
     throwOnError = false,
@@ -292,6 +350,7 @@ export async function runGitHubReview(
   const incrementalBaseSha = shouldUseIncrementalReview(trigger)
     ? getIncrementalHead(reviewPrKey)
     : undefined;
+  const feedbackSignals = loadGitHubFeedbackSignals(owner, repo);
 
   let progressCommentId: number | undefined;
   if (trigger === "comment-command") {
@@ -311,6 +370,9 @@ export async function runGitHubReview(
       repo,
       pullNumber,
       incrementalBaseSha,
+      customRules,
+      includeCiChecks,
+      feedbackSignals,
     });
 
     if (collected.files.length === 0) {
@@ -535,6 +597,36 @@ export async function runGitHubReview(
   }
 }
 
+export function recordGitHubFeedbackSignal(params: {
+  owner: string;
+  repo: string;
+  signal: string;
+}): void {
+  const feedbackKey = `${params.owner}/${params.repo}`;
+  const normalizedSignal = params.signal.trim().replace(/\s+/g, " ").slice(0, 240);
+  if (!normalizedSignal) {
+    return;
+  }
+
+  const now = Date.now();
+  const ttlMs = readNumberEnv(
+    "GITHUB_FEEDBACK_SIGNAL_TTL_MS",
+    DEFAULT_FEEDBACK_SIGNAL_TTL_MS,
+  );
+  pruneExpiredCache(feedbackSignalCache, now);
+  const currentSignals = feedbackSignalCache.get(feedbackKey)?.value ?? [];
+  const nextSignals = [
+    normalizedSignal,
+    ...currentSignals.filter((item) => item !== normalizedSignal),
+  ].slice(0, MAX_FEEDBACK_SIGNALS);
+
+  feedbackSignalCache.set(feedbackKey, {
+    value: nextSignals,
+    expiresAt: now + ttlMs,
+  });
+  trimCache(feedbackSignalCache, MAX_FEEDBACK_CACHE_ENTRIES);
+}
+
 function resolveDedupeTtlMs(
   trigger: ReviewTrigger,
   mode: ReviewMode,
@@ -549,14 +641,33 @@ function resolveDedupeTtlMs(
   return DEFAULT_DEDUPE_TTL_MS;
 }
 
+function loadGitHubFeedbackSignals(owner: string, repo: string): string[] {
+  const feedbackKey = `${owner}/${repo}`;
+  const now = Date.now();
+  pruneExpiredCache(feedbackSignalCache, now);
+  return feedbackSignalCache.get(feedbackKey)?.value ?? [];
+}
+
 async function collectGitHubPullRequestContext(params: {
   octokit: MinimalGitHubOctokit;
   owner: string;
   repo: string;
   pullNumber: number;
   incrementalBaseSha?: string;
+  customRules?: string[];
+  includeCiChecks?: boolean;
+  feedbackSignals?: string[];
 }): Promise<GitHubCollectedContext> {
-  const { octokit, owner, repo, pullNumber, incrementalBaseSha } = params;
+  const {
+    octokit,
+    owner,
+    repo,
+    pullNumber,
+    incrementalBaseSha,
+    customRules,
+    includeCiChecks = true,
+    feedbackSignals,
+  } = params;
 
   const prResponse = await octokit.pulls.get({
     owner,
@@ -641,6 +752,14 @@ async function collectGitHubPullRequestContext(params: {
     repo,
     ref: pr.base.ref,
   });
+  const ciChecks = includeCiChecks
+    ? await loadHeadCheckRuns({
+        octokit,
+        owner,
+        repo,
+        headSha: pr.head.sha,
+      })
+    : [];
 
   const input: PullRequestReviewInput = {
     platform: "github",
@@ -662,6 +781,9 @@ async function collectGitHubPullRequestContext(params: {
       deletions: file.deletions,
       extendedDiff: file.extendedDiff,
     })),
+    customRules: customRules ?? [],
+    feedbackSignals: feedbackSignals ?? [],
+    ciChecks,
     processGuidelines,
   };
 
@@ -843,6 +965,10 @@ export async function runGitHubAsk(
     question,
     trigger,
     dedupeSuffix,
+    customRules = [],
+    includeCiChecks = true,
+    commentTitle = "AI Ask",
+    displayQuestion,
     throwOnError = false,
   } = params;
   const { owner, repo } = context.repo();
@@ -859,17 +985,21 @@ export async function runGitHubAsk(
       owner,
       repo,
       issue_number: pullNumber,
-      body: "`AI Ask` 最近 5 分钟内已回答过相同问题，本次请求已跳过。",
+      body: `\`${commentTitle}\` 最近 5 分钟内已回答过相同问题，本次请求已跳过。`,
     });
     return;
   }
 
   try {
+    const feedbackSignals = loadGitHubFeedbackSignals(owner, repo);
     const collected = await collectGitHubPullRequestContext({
       octokit: context.octokit,
       owner,
       repo,
       pullNumber,
+      customRules,
+      includeCiChecks,
+      feedbackSignals,
     });
     const answer = await answerPullRequestQuestion(collected.input, question);
     await context.octokit.issues.createComment({
@@ -877,9 +1007,9 @@ export async function runGitHubAsk(
       repo,
       issue_number: pullNumber,
       body: [
-        "## AI Ask",
+        `## ${commentTitle}`,
         "",
-        `**Q:** ${question.trim()}`,
+        `**Q:** ${(displayQuestion ?? question).trim()}`,
         "",
         `**A:** ${answer}`,
       ].join("\n"),
@@ -903,7 +1033,7 @@ export async function runGitHubAsk(
         repo,
         issue_number: pullNumber,
         body: [
-          "## AI Ask 执行失败",
+          `## ${commentTitle} 执行失败`,
           "",
           `错误：\`${getPublicErrorMessage(error)}\``,
         ].join("\n"),
@@ -918,6 +1048,135 @@ export async function runGitHubAsk(
           error: getErrorMessage(commentError),
         },
         "Failed to publish GitHub ask failure comment",
+      );
+    }
+
+    if (throwOnError) {
+      throw ensureError(error);
+    }
+  }
+}
+
+export async function runGitHubChangelog(
+  params: GitHubChangelogRunParams,
+): Promise<void> {
+  const {
+    context,
+    pullNumber,
+    trigger,
+    focus,
+    apply = false,
+    dedupeSuffix,
+    customRules = [],
+    includeCiChecks = true,
+    throwOnError = false,
+  } = params;
+  const { owner, repo } = context.repo();
+  const requestKey = [
+    `github:${owner}/${repo}#${pullNumber}:changelog:${trigger}:${apply ? "apply" : "draft"}`,
+    dedupeSuffix,
+  ]
+    .filter(Boolean)
+    .join(":");
+
+  if (isDuplicateRequest(requestKey, DEFAULT_DEDUPE_TTL_MS)) {
+    await context.octokit.issues.createComment({
+      owner,
+      repo,
+      issue_number: pullNumber,
+      body: "`AI Changelog` 最近 5 分钟内已执行过同类请求，本次已跳过。",
+    });
+    return;
+  }
+
+  try {
+    const feedbackSignals = loadGitHubFeedbackSignals(owner, repo);
+    const collected = await collectGitHubPullRequestContext({
+      octokit: context.octokit,
+      owner,
+      repo,
+      pullNumber,
+      customRules,
+      includeCiChecks,
+      feedbackSignals,
+    });
+    const question = buildChangelogQuestion(focus);
+    const draft = (await answerPullRequestQuestion(collected.input, question)).trim();
+
+    if (!apply) {
+      await context.octokit.issues.createComment({
+        owner,
+        repo,
+        issue_number: pullNumber,
+        body: [
+          "## AI Changelog Draft",
+          "",
+          draft,
+          "",
+          "如需自动写入仓库 CHANGELOG，请使用：`/changelog --apply`。",
+        ].join("\n"),
+      });
+      return;
+    }
+
+    const applyResult = await applyGitHubChangelogUpdate({
+      context,
+      owner,
+      repo,
+      branch: collected.headBranch,
+      pullNumber,
+      draft,
+    });
+    await context.octokit.issues.createComment({
+      owner,
+      repo,
+      issue_number: pullNumber,
+      body: [
+        "## AI Changelog 已更新",
+        "",
+        applyResult.message,
+        "",
+        "```markdown",
+        draft,
+        "```",
+      ].join("\n"),
+    });
+  } catch (error) {
+    clearDuplicateRecord(requestKey);
+    context.log.error(
+      {
+        owner,
+        repo,
+        pullNumber,
+        trigger,
+        apply,
+        error: getErrorMessage(error),
+      },
+      "GitHub changelog failed",
+    );
+
+    try {
+      await context.octokit.issues.createComment({
+        owner,
+        repo,
+        issue_number: pullNumber,
+        body: [
+          "## AI Changelog 执行失败",
+          "",
+          `错误：\`${getPublicErrorMessage(error)}\``,
+        ].join("\n"),
+      });
+    } catch (commentError) {
+      context.log.error(
+        {
+          owner,
+          repo,
+          pullNumber,
+          trigger,
+          apply,
+          error: getErrorMessage(commentError),
+        },
+        "Failed to publish GitHub changelog failure comment",
       );
     }
 
@@ -965,6 +1224,47 @@ async function loadIncrementalPullFiles(params: {
     pull_number: params.pullNumber,
     per_page: 100,
   });
+}
+
+async function loadHeadCheckRuns(params: {
+  octokit: MinimalGitHubOctokit;
+  owner: string;
+  repo: string;
+  headSha: string;
+}): Promise<
+  Array<{
+    name: string;
+    status: string;
+    conclusion: string;
+    detailsUrl?: string;
+    summary?: string;
+  }>
+> {
+  if (!params.octokit.checks?.listForRef) {
+    return [];
+  }
+
+  try {
+    const response = await params.octokit.checks.listForRef({
+      owner: params.owner,
+      repo: params.repo,
+      ref: params.headSha,
+      per_page: 100,
+    });
+    const checkRuns = response.data.check_runs ?? [];
+    return checkRuns.slice(0, 50).map((item) => ({
+      name: item.name ?? "unknown-check",
+      status: item.status ?? "unknown",
+      conclusion: (item.conclusion ?? "pending").toString(),
+      detailsUrl: item.details_url ?? item.html_url ?? undefined,
+      summary:
+        item.output?.summary?.trim() ||
+        item.output?.title?.trim() ||
+        undefined,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function shouldUseIncrementalReview(trigger: ReviewTrigger): boolean {
@@ -1401,6 +1701,89 @@ function decodeGitHubFileContent(content: string, encoding: string | undefined):
   }
 
   return content;
+}
+
+function buildChangelogQuestion(focus: string | undefined): string {
+  if (focus && focus.trim()) {
+    return `请根据当前 PR 改动生成可直接放入 CHANGELOG.md 的 Markdown 条目（Keep a Changelog 风格），重点覆盖：${focus.trim()}。仅输出 changelog 内容本体，不要额外说明。`;
+  }
+
+  return "请根据当前 PR 改动生成可直接放入 CHANGELOG.md 的 Markdown 条目（Keep a Changelog 风格）。仅输出 changelog 内容本体，不要额外说明。";
+}
+
+async function applyGitHubChangelogUpdate(params: {
+  context: GitHubReviewContext;
+  owner: string;
+  repo: string;
+  branch: string;
+  pullNumber: number;
+  draft: string;
+}): Promise<{ message: string }> {
+  const path = process.env.GITHUB_CHANGELOG_PATH?.trim() || "CHANGELOG.md";
+  const title = `PR #${params.pullNumber}`;
+  const octokit = params.context.octokit;
+  if (!octokit.repos.createOrUpdateFileContents) {
+    return {
+      message: "当前运行模式不支持自动写回仓库文件，已生成 changelog 草稿供手动应用。",
+    };
+  }
+
+  let existing = "";
+  let existingSha: string | undefined;
+  try {
+    const response = await octokit.repos.getContent({
+      owner: params.owner,
+      repo: params.repo,
+      path,
+      ref: params.branch,
+    });
+    const data = response.data;
+    if (!Array.isArray(data) && data.content) {
+      existing = decodeGitHubFileContent(data.content, data.encoding);
+      existingSha = data.sha;
+    }
+  } catch {
+    // create path on first write
+  }
+
+  const merged = mergeChangelogContent(existing, params.draft, title);
+  await octokit.repos.createOrUpdateFileContents({
+    owner: params.owner,
+    repo: params.repo,
+    path,
+    message: `chore(changelog): update from ${title}`,
+    content: Buffer.from(merged, "utf8").toString("base64"),
+    sha: existingSha,
+    branch: params.branch,
+  });
+
+  return {
+    message: `已写入 \`${path}\`（branch: \`${params.branch}\`）。`,
+  };
+}
+
+function mergeChangelogContent(
+  currentContent: string,
+  draft: string,
+  title: string,
+): string {
+  const normalizedDraft = draft.trim();
+  const safeTitle = title.trim();
+  const entry = [`### ${safeTitle}`, "", normalizedDraft].join("\n");
+  const body = currentContent.trim();
+
+  if (!body) {
+    return ["# Changelog", "", "## Unreleased", "", entry, ""].join("\n");
+  }
+
+  const unreleasedRe = /^##\s+Unreleased\s*$/im;
+  const match = unreleasedRe.exec(body);
+  if (!match || match.index === undefined) {
+    return [body, "", "## Unreleased", "", entry, ""].join("\n");
+  }
+
+  const insertAt = match.index + match[0].length;
+  return `${body.slice(0, insertAt)}\n\n${entry}\n${body.slice(insertAt)}`.trimEnd() + "\n";
 }
 
 function getErrorMessage(error: unknown): string {

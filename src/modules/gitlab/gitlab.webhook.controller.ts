@@ -1,7 +1,7 @@
 import { Controller, Get, Headers, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
 
-import type { GitLabMrWebhookBody } from "#integrations/gitlab";
+import type { GitLabWebhookBody } from "#integrations/gitlab";
 import { GitlabWebhookService } from "./gitlab.webhook.service.js";
 
 @Controller("gitlab")
@@ -19,7 +19,7 @@ export class GitlabWebhookController {
     @Headers() headers: Record<string, string | string[] | undefined>,
   ): Promise<{ ok: boolean; message: string }> {
     return this.gitlabWebhookService.handleTrigger({
-      payload: request.body as GitLabMrWebhookBody | undefined,
+      payload: request.body as GitLabWebhookBody | undefined,
       headers,
     });
   }

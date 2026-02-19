@@ -11,9 +11,12 @@ import { z } from "zod";
 import {
   type GitHubPullsListFilesMethod,
   type GitHubRepositoryContentFile,
+  recordGitHubFeedbackSignal,
   runGitHubAsk,
+  runGitHubChangelog,
   runGitHubDescribe,
   runGitHubReview,
+  type GitHubCheckRunSummary,
   type GitHubPullFile,
   type GitHubPullSummary,
   type GitHubReviewContext,
@@ -27,7 +30,15 @@ import {
   runGitHubIssuePolicyCheck,
   runGitHubPullRequestPolicyCheck,
 } from "./github-policy.js";
-import { parseAskCommand, parseDescribeCommand, parseReviewCommand } from "#review";
+import {
+  parseAskCommand,
+  parseChangelogCommand,
+  parseChecksCommand,
+  parseDescribeCommand,
+  parseFeedbackCommand,
+  parseGenerateTestsCommand,
+  parseReviewCommand,
+} from "#review";
 
 const COMMAND = "/ai-review";
 const DEFAULT_GITHUB_API_URL = "https://api.github.com";
@@ -92,6 +103,16 @@ const issueCommentWebhookPayloadSchema = z.object({
   }),
 });
 
+const pullRequestReviewThreadPayloadSchema = z.object({
+  action: z.string().optional(),
+  repository: repositoryInfoPayloadSchema,
+  pull_request: z
+    .object({
+      number: z.number().int().positive(),
+    })
+    .optional(),
+});
+
 export async function handlePlainGitHubWebhook(params: {
   payload: unknown;
   rawBody: string;
@@ -134,11 +155,20 @@ export async function handlePlainGitHubWebhook(params: {
     const context = createReviewContext(owner, repo, octokit, params.logger);
     const action = payload.action?.toLowerCase();
     if (action === "closed" && payload.pull_request?.merged) {
+      const reviewBehavior = await resolveGitHubReviewBehaviorPolicy({
+        context,
+        baseRef:
+          payload.pull_request.base?.ref ?? payload.repository.default_branch,
+      });
       await runGitHubReview({
         context,
         pullNumber: payload.pull_request.number,
         mode: "report",
         trigger: "merged",
+        customRules: reviewBehavior.customRules,
+        includeCiChecks: reviewBehavior.includeCiChecks,
+        enableSecretScan: reviewBehavior.secretScanEnabled,
+        enableAutoLabel: reviewBehavior.autoLabelEnabled,
         throwOnError: true,
       });
 
@@ -179,6 +209,8 @@ export async function handlePlainGitHubWebhook(params: {
                 ? "pr-edited"
                 : "pr-synchronize",
           dedupeSuffix: payload.pull_request.head?.sha,
+          customRules: autoReview.customRules,
+          includeCiChecks: autoReview.includeCiChecks,
           enableSecretScan: autoReview.secretScanEnabled,
           enableAutoLabel: autoReview.autoLabelEnabled,
         });
@@ -218,6 +250,37 @@ export async function handlePlainGitHubWebhook(params: {
     return { ok: true, message: "issue policy check triggered" };
   }
 
+  if (eventName === "pull_request_review_thread") {
+    const payload = parsePayload(
+      pullRequestReviewThreadPayloadSchema,
+      params.payload,
+      "pull_request_review_thread",
+    );
+    const owner = payload.repository.owner.login ?? payload.repository.owner.name;
+    const repo = payload.repository.name;
+    if (!owner || !repo) {
+      throw new BadWebhookRequestError("invalid pull_request_review_thread payload");
+    }
+
+    const action = payload.action?.toLowerCase();
+    if (action !== "resolved" && action !== "unresolved") {
+      return { ok: true, message: "ignored pull_request_review_thread action" };
+    }
+
+    const pullNumber = payload.pull_request?.number;
+    const signal =
+      action === "resolved"
+        ? `PR #${pullNumber ?? "?"} review thread resolved: 开发者倾向已修复/高价值建议`
+        : `PR #${pullNumber ?? "?"} review thread unresolved: 开发者认为建议仍未满足`;
+    recordGitHubFeedbackSignal({
+      owner,
+      repo,
+      signal,
+    });
+
+    return { ok: true, message: "pull_request_review_thread feedback recorded" };
+  }
+
   if (eventName === "issue_comment") {
     const payload = parsePayload(
       issueCommentWebhookPayloadSchema,
@@ -241,6 +304,41 @@ export async function handlePlainGitHubWebhook(params: {
     }
 
     const context = createReviewContext(owner, repo, octokit, params.logger);
+    const feedbackCommand = parseFeedbackCommand(body);
+    if (feedbackCommand.matched) {
+      const reviewBehavior = await resolveGitHubReviewBehaviorPolicy({
+        context,
+      });
+      if (!reviewBehavior.feedbackCommandEnabled) {
+        await context.octokit.issues.createComment({
+          owner,
+          repo,
+          issue_number: payload.issue.number,
+          body: "`/feedback` 在当前仓库已被禁用（.mr-agent.yml -> review.feedbackCommandEnabled=false）。",
+        });
+        return { ok: true, message: "feedback command ignored by policy" };
+      }
+
+      const positive =
+        feedbackCommand.action === "resolved" || feedbackCommand.action === "up";
+      const signalCore = positive
+        ? "开发者更偏好高置信、可落地建议"
+        : "开发者希望减少低价值或噪音建议";
+      const noteText = feedbackCommand.note ? `；备注：${feedbackCommand.note}` : "";
+      recordGitHubFeedbackSignal({
+        owner,
+        repo,
+        signal: `PR #${payload.issue.number} ${feedbackCommand.action}: ${signalCore}${noteText}`,
+      });
+      await context.octokit.issues.createComment({
+        owner,
+        repo,
+        issue_number: payload.issue.number,
+        body: `已记录反馈信号：\`${feedbackCommand.action}\`。后续评审会参考该偏好。`,
+      });
+      return { ok: true, message: "feedback command recorded" };
+    }
+
     const describe = parseDescribeCommand(body);
     if (describe.matched) {
       const describePolicy = await resolveGitHubDescribePolicy({
@@ -279,14 +377,127 @@ export async function handlePlainGitHubWebhook(params: {
 
     const ask = parseAskCommand(body);
     if (ask.matched) {
+      const reviewBehavior = await resolveGitHubReviewBehaviorPolicy({
+        context,
+      });
+      if (!reviewBehavior.askCommandEnabled) {
+        await context.octokit.issues.createComment({
+          owner,
+          repo,
+          issue_number: payload.issue.number,
+          body: "`/ask` 在当前仓库已被禁用（.mr-agent.yml -> review.askCommandEnabled=false）。",
+        });
+        return { ok: true, message: "ask command ignored by policy" };
+      }
       await runGitHubAsk({
         context,
         pullNumber: payload.issue.number,
         question: ask.question,
         trigger: "comment-command",
+        customRules: reviewBehavior.customRules,
+        includeCiChecks: reviewBehavior.includeCiChecks,
         throwOnError: true,
       });
       return { ok: true, message: "ask command triggered" };
+    }
+
+    const checksCommand = parseChecksCommand(body);
+    if (checksCommand.matched) {
+      const reviewBehavior = await resolveGitHubReviewBehaviorPolicy({
+        context,
+      });
+      if (!reviewBehavior.checksCommandEnabled) {
+        await context.octokit.issues.createComment({
+          owner,
+          repo,
+          issue_number: payload.issue.number,
+          body: "`/checks` 在当前仓库已被禁用（.mr-agent.yml -> review.checksCommandEnabled=false）。",
+        });
+        return { ok: true, message: "checks command ignored by policy" };
+      }
+
+      const checksQuestion = checksCommand.question
+        ? `请结合当前 PR 的 CI 检查结果给出修复建议。额外问题：${checksCommand.question}`
+        : "请结合当前 PR 的 CI 检查结果，分析失败原因并给出可执行修复步骤（优先级从高到低）。";
+      await runGitHubAsk({
+        context,
+        pullNumber: payload.issue.number,
+        question: checksQuestion,
+        trigger: "comment-command",
+        customRules: reviewBehavior.customRules,
+        includeCiChecks: true,
+        throwOnError: true,
+      });
+      return { ok: true, message: "checks command triggered" };
+    }
+
+    const generateTests = parseGenerateTestsCommand(body);
+    if (generateTests.matched) {
+      const reviewBehavior = await resolveGitHubReviewBehaviorPolicy({
+        context,
+      });
+      if (!reviewBehavior.generateTestsCommandEnabled) {
+        await context.octokit.issues.createComment({
+          owner,
+          repo,
+          issue_number: payload.issue.number,
+          body: "`/generate_tests` 在当前仓库已被禁用（.mr-agent.yml -> review.generateTestsCommandEnabled=false）。",
+        });
+        return { ok: true, message: "generate_tests command ignored by policy" };
+      }
+      const generateTestsQuestion = generateTests.focus
+        ? `请基于当前 PR 改动生成可执行测试方案和测试代码草案，重点覆盖：${generateTests.focus}。输出要求：按文件路径分组，包含测试名称、前置条件、关键断言、边界/回归用例。`
+        : "请基于当前 PR 改动生成可执行测试方案和测试代码草案。输出要求：按文件路径分组，包含测试名称、前置条件、关键断言、边界/回归用例。";
+      await runGitHubAsk({
+        context,
+        pullNumber: payload.issue.number,
+        question: generateTestsQuestion,
+        trigger: "comment-command",
+        customRules: reviewBehavior.customRules,
+        includeCiChecks: reviewBehavior.includeCiChecks,
+        commentTitle: "AI Test Generator",
+        displayQuestion: generateTests.focus
+          ? `/generate_tests ${generateTests.focus}`
+          : "/generate_tests",
+        throwOnError: true,
+      });
+      return { ok: true, message: "generate_tests command triggered" };
+    }
+
+    const changelogCommand = parseChangelogCommand(body);
+    if (changelogCommand.matched) {
+      const reviewBehavior = await resolveGitHubReviewBehaviorPolicy({
+        context,
+      });
+      if (!reviewBehavior.changelogCommandEnabled) {
+        await context.octokit.issues.createComment({
+          owner,
+          repo,
+          issue_number: payload.issue.number,
+          body: "`/changelog` 在当前仓库已被禁用（.mr-agent.yml -> review.changelogCommandEnabled=false）。",
+        });
+        return { ok: true, message: "changelog command ignored by policy" };
+      }
+      if (changelogCommand.apply && !reviewBehavior.changelogAllowApply) {
+        await context.octokit.issues.createComment({
+          owner,
+          repo,
+          issue_number: payload.issue.number,
+          body: "`/changelog --apply` 在当前仓库已被禁用（.mr-agent.yml -> review.changelogAllowApply=false）。",
+        });
+        return { ok: true, message: "changelog apply ignored by policy" };
+      }
+      await runGitHubChangelog({
+        context,
+        pullNumber: payload.issue.number,
+        trigger: "comment-command",
+        focus: changelogCommand.focus,
+        apply: changelogCommand.apply && reviewBehavior.changelogAllowApply,
+        customRules: reviewBehavior.customRules,
+        includeCiChecks: reviewBehavior.includeCiChecks,
+        throwOnError: true,
+      });
+      return { ok: true, message: "changelog command triggered" };
     }
 
     if (!body.startsWith(COMMAND)) {
@@ -308,6 +519,8 @@ export async function handlePlainGitHubWebhook(params: {
       pullNumber: payload.issue.number,
       mode,
       trigger: "comment-command",
+      customRules: reviewBehavior.customRules,
+      includeCiChecks: reviewBehavior.includeCiChecks,
       enableSecretScan: reviewBehavior.secretScanEnabled,
       enableAutoLabel: reviewBehavior.autoLabelEnabled,
       throwOnError: true,
@@ -409,6 +622,19 @@ function createRestBackedOctokit(config: RestGitHubClientConfig): MinimalGitHubO
         });
         return { data };
       },
+      createOrUpdateFileContents: async (params) => {
+        await requestJson(config, {
+          method: "PUT",
+          path: `/repos/${encodeURIComponent(params.owner as string)}/${encodeURIComponent(params.repo as string)}/contents/${encodePath(params.path as string)}`,
+          body: {
+            message: params.message,
+            content: params.content,
+            sha: params.sha,
+            branch: params.branch,
+          },
+        });
+        return {};
+      },
     },
     pulls: {
       listFiles,
@@ -493,6 +719,19 @@ function createRestBackedOctokit(config: RestGitHubClientConfig): MinimalGitHubO
         });
         return {};
       },
+      listForRef: async (params) => {
+        const data = await requestJson<{ check_runs?: GitHubCheckRunSummary[] }>(config, {
+          method: "GET",
+          path: `/repos/${encodeURIComponent(params.owner as string)}/${encodeURIComponent(params.repo as string)}/commits/${encodeURIComponent(params.ref as string)}/check-runs?per_page=${Math.max(1, Math.min(Number(params.per_page ?? 100), 100))}`,
+        });
+        return {
+          data: {
+            check_runs: Array.isArray(data.check_runs)
+              ? data.check_runs
+              : [],
+          },
+        };
+      },
     },
     paginate: async (_method, params) => {
       return listPullFiles(config, params);
@@ -533,7 +772,7 @@ async function listPullFiles(
 async function requestJson<T = unknown>(
   config: RestGitHubClientConfig,
   params: {
-    method: "GET" | "POST" | "PATCH";
+    method: "GET" | "POST" | "PATCH" | "PUT";
     path: string;
     body?: unknown;
   },

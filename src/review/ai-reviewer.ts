@@ -105,6 +105,9 @@ const SYSTEM_PROMPT = [
   "reviews 数组中的行号必须是证据充分的真实行号；不确定就不要输出该问题。",
   "issueHeader 简短（建议 <= 12 字），issueContent 要有明确修复建议。",
   "若有明确且可直接替换的修复代码，可提供 suggestion（仅代码本体，不含解释和 markdown 标记）。",
+  "若输入提供了 Team custom review rules，必须严格按规则检查并在结论中体现。",
+  "若输入提供了 feedback signals，请在建议中体现这些历史反馈偏好，降低重复误报。",
+  "若输入提供了 CI checks，必须结合失败检查给出针对性修复建议。",
   "输出必须是 JSON 对象，不要 markdown 代码块。",
 ].join("\n");
 
@@ -112,6 +115,7 @@ const ASK_SYSTEM_PROMPT = [
   "你是资深代码评审助手。",
   "用户会基于同一个 PR/MR 的 diff 提问，请给出准确、可执行、可验证的回答。",
   "回答要先给结论，再给证据（文件/行号/代码片段线索）。",
+  "若输入提供了 feedback signals，请优先遵循这些历史反馈偏好。",
   "若信息不足以得出结论，请明确说不确定并指出还缺什么。",
   "输出必须是 JSON 对象，格式为 {\"answer\":\"...\"}，不要 markdown 代码块。",
 ].join("\n");
@@ -213,6 +217,28 @@ function buildUserPrompt(pullRequest: PullRequestReviewInput): string {
           .join("\n\n")
       : "(none)";
 
+  const customRulesText =
+    pullRequest.customRules && pullRequest.customRules.length > 0
+      ? pullRequest.customRules.map((rule) => `- ${rule}`).join("\n")
+      : "(none)";
+
+  const feedbackSignalsText =
+    pullRequest.feedbackSignals && pullRequest.feedbackSignals.length > 0
+      ? pullRequest.feedbackSignals.map((signal) => `- ${signal}`).join("\n")
+      : "(none)";
+
+  const ciChecksText =
+    pullRequest.ciChecks && pullRequest.ciChecks.length > 0
+      ? pullRequest.ciChecks
+          .slice(0, 30)
+          .map((item) => {
+            const url = item.detailsUrl ? `, url=${item.detailsUrl}` : "";
+            const summary = item.summary ? `\n  summary=${item.summary}` : "";
+            return `- ${item.name} (status=${item.status}, conclusion=${item.conclusion}${url})${summary}`;
+          })
+          .join("\n")
+      : "(none)";
+
   return [
     `Platform: ${pullRequest.platform}`,
     `Repository: ${pullRequest.repository}`,
@@ -231,6 +257,15 @@ function buildUserPrompt(pullRequest: PullRequestReviewInput): string {
     "Repository process guidelines (.github templates/workflows/etc):",
     guidelinesText,
     "",
+    "Team custom review rules:",
+    customRulesText,
+    "",
+    "Feedback signals from developers:",
+    feedbackSignalsText,
+    "",
+    "CI checks on current head:",
+    ciChecksText,
+    "",
     "Diff with line mapping:",
     filesText || "(no textual patch available)",
     "",
@@ -241,6 +276,9 @@ function buildUserPrompt(pullRequest: PullRequestReviewInput): string {
     "4) 若没有明确问题，reviews 为空数组；",
     "5) 若存在流程/模板改动，actionItems 至少包含 1 条流程改进建议。",
     "6) 仅当能给出可直接替换的修复代码时，才填写 suggestion 字段。",
+    "7) 若 Team custom review rules 非空，必须覆盖这些规则的检查结果。",
+    "8) 若存在失败 CI checks，actionItems 至少包含 1 条与失败检查直接相关的修复建议。",
+    "9) 若 Feedback signals 非空，尽量避免重复历史上被判定为低价值的建议形态。",
   ].join("\n");
 }
 
@@ -278,6 +316,28 @@ function buildAskPrompt(
           .join("\n\n")
       : "(none)";
 
+  const customRulesText =
+    pullRequest.customRules && pullRequest.customRules.length > 0
+      ? pullRequest.customRules.map((rule) => `- ${rule}`).join("\n")
+      : "(none)";
+
+  const feedbackSignalsText =
+    pullRequest.feedbackSignals && pullRequest.feedbackSignals.length > 0
+      ? pullRequest.feedbackSignals.map((signal) => `- ${signal}`).join("\n")
+      : "(none)";
+
+  const ciChecksText =
+    pullRequest.ciChecks && pullRequest.ciChecks.length > 0
+      ? pullRequest.ciChecks
+          .slice(0, 30)
+          .map((item) => {
+            const url = item.detailsUrl ? `, url=${item.detailsUrl}` : "";
+            const summary = item.summary ? `\n  summary=${item.summary}` : "";
+            return `- ${item.name} (status=${item.status}, conclusion=${item.conclusion}${url})${summary}`;
+          })
+          .join("\n")
+      : "(none)";
+
   return [
     `Platform: ${pullRequest.platform}`,
     `Repository: ${pullRequest.repository}`,
@@ -292,6 +352,15 @@ function buildAskPrompt(
     "",
     "Repository process guidelines (.github templates/workflows/etc):",
     guidelinesText,
+    "",
+    "Team custom review rules:",
+    customRulesText,
+    "",
+    "Feedback signals from developers:",
+    feedbackSignalsText,
+    "",
+    "CI checks on current head:",
+    ciChecksText,
     "",
     "Diff with line mapping:",
     filesText || "(no textual patch available)",

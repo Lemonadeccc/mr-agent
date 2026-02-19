@@ -32,8 +32,16 @@ interface ReviewPolicyConfig {
   onSynchronize: boolean;
   describeEnabled: boolean;
   describeAllowApply: boolean;
+  checksCommandEnabled: boolean;
+  includeCiChecks: boolean;
   secretScanEnabled: boolean;
   autoLabelEnabled: boolean;
+  askCommandEnabled: boolean;
+  generateTestsCommandEnabled: boolean;
+  changelogCommandEnabled: boolean;
+  changelogAllowApply: boolean;
+  feedbackCommandEnabled: boolean;
+  customRules: string[];
 }
 
 interface RepoPolicyConfig {
@@ -125,8 +133,16 @@ const defaultPolicyConfig: RepoPolicyConfig = {
     onSynchronize: true,
     describeEnabled: true,
     describeAllowApply: false,
+    checksCommandEnabled: true,
+    includeCiChecks: true,
     secretScanEnabled: true,
     autoLabelEnabled: true,
+    askCommandEnabled: true,
+    generateTestsCommandEnabled: true,
+    changelogCommandEnabled: true,
+    changelogAllowApply: false,
+    feedbackCommandEnabled: true,
+    customRules: [],
   },
 };
 
@@ -242,6 +258,8 @@ export async function resolveGitHubPullRequestAutoReviewPolicy(params: {
 }): Promise<{
   enabled: boolean;
   mode: ReviewMode;
+  customRules: string[];
+  includeCiChecks: boolean;
   secretScanEnabled: boolean;
   autoLabelEnabled: boolean;
 }> {
@@ -259,6 +277,8 @@ export async function resolveGitHubPullRequestAutoReviewPolicy(params: {
     return {
       enabled: false,
       mode: review.mode,
+      customRules: review.customRules,
+      includeCiChecks: review.includeCiChecks,
       secretScanEnabled: review.secretScanEnabled,
       autoLabelEnabled: review.autoLabelEnabled,
     };
@@ -268,6 +288,8 @@ export async function resolveGitHubPullRequestAutoReviewPolicy(params: {
     return {
       enabled: review.onOpened,
       mode: review.mode,
+      customRules: review.customRules,
+      includeCiChecks: review.includeCiChecks,
       secretScanEnabled: review.secretScanEnabled,
       autoLabelEnabled: review.autoLabelEnabled,
     };
@@ -277,6 +299,8 @@ export async function resolveGitHubPullRequestAutoReviewPolicy(params: {
     return {
       enabled: review.onEdited,
       mode: review.mode,
+      customRules: review.customRules,
+      includeCiChecks: review.includeCiChecks,
       secretScanEnabled: review.secretScanEnabled,
       autoLabelEnabled: review.autoLabelEnabled,
     };
@@ -285,6 +309,8 @@ export async function resolveGitHubPullRequestAutoReviewPolicy(params: {
   return {
     enabled: review.onSynchronize,
     mode: review.mode,
+    customRules: review.customRules,
+    includeCiChecks: review.includeCiChecks,
     secretScanEnabled: review.secretScanEnabled,
     autoLabelEnabled: review.autoLabelEnabled,
   };
@@ -312,7 +338,18 @@ export async function resolveGitHubDescribePolicy(params: {
 export async function resolveGitHubReviewBehaviorPolicy(params: {
   context: GitHubReviewContext;
   baseRef?: string;
-}): Promise<{ secretScanEnabled: boolean; autoLabelEnabled: boolean }> {
+}): Promise<{
+  customRules: string[];
+  includeCiChecks: boolean;
+  checksCommandEnabled: boolean;
+  secretScanEnabled: boolean;
+  autoLabelEnabled: boolean;
+  askCommandEnabled: boolean;
+  generateTestsCommandEnabled: boolean;
+  changelogCommandEnabled: boolean;
+  changelogAllowApply: boolean;
+  feedbackCommandEnabled: boolean;
+}> {
   const { context } = params;
   const { owner, repo } = context.repo();
   const config = await loadRepositoryPolicyConfig({
@@ -323,8 +360,16 @@ export async function resolveGitHubReviewBehaviorPolicy(params: {
   });
 
   return {
+    customRules: config.review.customRules,
+    includeCiChecks: config.review.includeCiChecks,
+    checksCommandEnabled: config.review.checksCommandEnabled,
     secretScanEnabled: config.review.secretScanEnabled,
     autoLabelEnabled: config.review.autoLabelEnabled,
+    askCommandEnabled: config.review.askCommandEnabled,
+    generateTestsCommandEnabled: config.review.generateTestsCommandEnabled,
+    changelogCommandEnabled: config.review.changelogCommandEnabled,
+    changelogAllowApply: config.review.changelogAllowApply,
+    feedbackCommandEnabled: config.review.feedbackCommandEnabled,
   };
 }
 
@@ -861,8 +906,16 @@ function normalizeRepoPolicyConfig(raw: Partial<RepoPolicyConfig>): RepoPolicyCo
       onSynchronize: review.onSynchronize !== false,
       describeEnabled: review.describeEnabled !== false,
       describeAllowApply: Boolean(review.describeAllowApply),
+      checksCommandEnabled: review.checksCommandEnabled !== false,
+      includeCiChecks: review.includeCiChecks !== false,
       secretScanEnabled: review.secretScanEnabled !== false,
       autoLabelEnabled: review.autoLabelEnabled !== false,
+      askCommandEnabled: review.askCommandEnabled !== false,
+      generateTestsCommandEnabled: review.generateTestsCommandEnabled !== false,
+      changelogCommandEnabled: review.changelogCommandEnabled !== false,
+      changelogAllowApply: Boolean(review.changelogAllowApply),
+      feedbackCommandEnabled: review.feedbackCommandEnabled !== false,
+      customRules: normalizeStringList(review.customRules).slice(0, 30),
     },
   };
 }
@@ -886,7 +939,11 @@ function parseSimpleYamlPolicyConfig(yamlText: string): Partial<RepoPolicyConfig
   const pullRequest: Partial<PullRequestPolicySectionConfig> = {};
   const review: Partial<ReviewPolicyConfig> = {};
   let currentSection: "root" | "issue" | "pullRequest" | "review" = "root";
-  let listTarget: "issueRequiredSections" | "pullRequestRequiredSections" | undefined;
+  let listTarget:
+    | "issueRequiredSections"
+    | "pullRequestRequiredSections"
+    | "reviewCustomRules"
+    | undefined;
 
   for (const rawLine of yamlText.split("\n")) {
     const line = stripYamlComment(rawLine);
@@ -905,6 +962,8 @@ function parseSimpleYamlPolicyConfig(yamlText: string): Partial<RepoPolicyConfig
 
       if (listTarget === "issueRequiredSections") {
         issue.requiredSections = [...(issue.requiredSections ?? []), stripYamlQuotes(item)];
+      } else if (listTarget === "reviewCustomRules") {
+        review.customRules = [...(review.customRules ?? []), stripYamlQuotes(item)];
       } else {
         pullRequest.requiredSections = [
           ...(pullRequest.requiredSections ?? []),
@@ -974,6 +1033,11 @@ function parseSimpleYamlPolicyConfig(yamlText: string): Partial<RepoPolicyConfig
 
     if (currentSection === "review") {
       listTarget = undefined;
+      if (key === "customRules" && valueRaw === "") {
+        listTarget = "reviewCustomRules";
+        review.customRules = review.customRules ?? [];
+        continue;
+      }
       applyReviewConfigKey(review, key, valueRaw);
     }
   }
@@ -1031,6 +1095,16 @@ function applyReviewConfigKey(
     return;
   }
 
+  if (key === "checksCommandEnabled" || key === "checks_command_enabled") {
+    target.checksCommandEnabled = parseYamlBoolean(valueRaw);
+    return;
+  }
+
+  if (key === "includeCiChecks" || key === "include_ci_checks") {
+    target.includeCiChecks = parseYamlBoolean(valueRaw);
+    return;
+  }
+
   if (key === "secretScanEnabled" || key === "secret_scan_enabled") {
     target.secretScanEnabled = parseYamlBoolean(valueRaw);
     return;
@@ -1038,6 +1112,44 @@ function applyReviewConfigKey(
 
   if (key === "autoLabelEnabled" || key === "auto_label_enabled") {
     target.autoLabelEnabled = parseYamlBoolean(valueRaw);
+    return;
+  }
+
+  if (key === "askCommandEnabled" || key === "ask_command_enabled") {
+    target.askCommandEnabled = parseYamlBoolean(valueRaw);
+    return;
+  }
+
+  if (
+    key === "generateTestsCommandEnabled" ||
+    key === "generate_tests_command_enabled"
+  ) {
+    target.generateTestsCommandEnabled = parseYamlBoolean(valueRaw);
+    return;
+  }
+
+  if (key === "changelogCommandEnabled" || key === "changelog_command_enabled") {
+    target.changelogCommandEnabled = parseYamlBoolean(valueRaw);
+    return;
+  }
+
+  if (key === "changelogAllowApply" || key === "changelog_allow_apply") {
+    target.changelogAllowApply = parseYamlBoolean(valueRaw);
+    return;
+  }
+
+  if (key === "feedbackCommandEnabled" || key === "feedback_command_enabled") {
+    target.feedbackCommandEnabled = parseYamlBoolean(valueRaw);
+    return;
+  }
+
+  if (key === "customRules" && valueRaw.startsWith("[")) {
+    target.customRules = valueRaw
+      .replace(/^\[/, "")
+      .replace(/\]$/, "")
+      .split(",")
+      .map((item) => stripYamlQuotes(item.trim()))
+      .filter(Boolean);
   }
 }
 

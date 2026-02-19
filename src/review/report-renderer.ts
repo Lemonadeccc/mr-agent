@@ -30,6 +30,13 @@ const REVIEW_COMMAND_RE =
   /^\/ai-review(?:\s+(report|comment))?(?:\s+--mode=(report|comment))?\s*$/i;
 const DESCRIBE_COMMAND_RE = /^\/(?:describe|ai-review\s+describe)(?:\s+--apply)?\s*$/i;
 const ASK_COMMAND_RE = /^\/(?:ask|ai-review\s+ask)\s+([\s\S]+)$/i;
+const CHECKS_COMMAND_RE = /^\/(?:checks|ai-review\s+checks)(?:\s+([\s\S]+))?\s*$/i;
+const GENERATE_TESTS_COMMAND_RE =
+  /^\/(?:generate[_-]?tests|ai-review\s+generate[_-]?tests)(?:\s+([\s\S]+))?\s*$/i;
+const CHANGELOG_COMMAND_RE =
+  /^\/(?:changelog|ai-review\s+changelog)(?:\s+--apply)?(?:\s+([\s\S]+))?\s*$/i;
+const FEEDBACK_COMMAND_RE =
+  /^\/(?:feedback|ai-review\s+feedback)\s+(resolved|dismissed|up|down)(?:\s+([\s\S]+))?\s*$/i;
 
 export function parseReviewCommand(rawBody: string): {
   matched: boolean;
@@ -84,6 +91,86 @@ export function parseAskCommand(rawBody: string): {
   return { matched: true, question };
 }
 
+export function parseChecksCommand(rawBody: string): {
+  matched: boolean;
+  question: string;
+} {
+  const body = rawBody.trim();
+  const matched = body.match(CHECKS_COMMAND_RE);
+  if (!matched) {
+    return { matched: false, question: "" };
+  }
+
+  return {
+    matched: true,
+    question: matched[1]?.trim() ?? "",
+  };
+}
+
+export function parseGenerateTestsCommand(rawBody: string): {
+  matched: boolean;
+  focus: string;
+} {
+  const body = rawBody.trim();
+  const matched = body.match(GENERATE_TESTS_COMMAND_RE);
+  if (!matched) {
+    return { matched: false, focus: "" };
+  }
+
+  return {
+    matched: true,
+    focus: matched[1]?.trim() ?? "",
+  };
+}
+
+export function parseChangelogCommand(rawBody: string): {
+  matched: boolean;
+  apply: boolean;
+  focus: string;
+} {
+  const body = rawBody.trim();
+  const matched = body.match(CHANGELOG_COMMAND_RE);
+  if (!matched) {
+    return { matched: false, apply: false, focus: "" };
+  }
+
+  const focus = (matched[1] ?? "")
+    .replace(/\s*--apply(?:\s|$)/gi, " ")
+    .trim();
+
+  return {
+    matched: true,
+    apply: /\s--apply(?:\s|$)/i.test(body),
+    focus,
+  };
+}
+
+export function parseFeedbackCommand(rawBody: string): {
+  matched: boolean;
+  action: "resolved" | "dismissed" | "up" | "down";
+  note: string;
+} {
+  const body = rawBody.trim();
+  const matched = body.match(FEEDBACK_COMMAND_RE);
+  if (!matched) {
+    return { matched: false, action: "up", note: "" };
+  }
+
+  const actionRaw = (matched[1] ?? "").toLowerCase();
+  const action: "resolved" | "dismissed" | "up" | "down" =
+    actionRaw === "resolved" ||
+    actionRaw === "dismissed" ||
+    actionRaw === "down"
+      ? actionRaw
+      : "up";
+
+  return {
+    matched: true,
+    action,
+    note: matched[2]?.trim() ?? "",
+  };
+}
+
 export function buildIssueCommentMarkdown(
   review: ReviewIssue,
   options?: { platform?: "github" | "gitlab" },
@@ -97,10 +184,7 @@ export function buildIssueCommentMarkdown(
     "</table>",
   ];
 
-  const suggestion =
-    options?.platform === "github" || !options?.platform
-      ? buildSuggestionBlock(review)
-      : undefined;
+  const suggestion = buildSuggestionBlock(review, options?.platform);
   if (suggestion) {
     content.push("", suggestion);
   }
@@ -124,6 +208,7 @@ export function buildReportCommentMarkdown(
       : result.actionItems.map((item) => `- ${item}`).join("\n");
 
   const issuesTable = renderIssuesTable(result, files, context);
+  const changeGraph = buildChangedFilesMermaid(files);
 
   return [
     "## AI 代码评审报告",
@@ -140,6 +225,9 @@ export function buildReportCommentMarkdown(
     "",
     "### 建议后续动作",
     actionItems,
+    ...(changeGraph
+      ? ["", "### 变更结构图（Mermaid）", "", changeGraph]
+      : []),
   ].join("\n");
 }
 
@@ -231,7 +319,10 @@ function riskLabel(level: RiskLevel): string {
   return "低";
 }
 
-function buildSuggestionBlock(review: ReviewIssue): string | undefined {
+function buildSuggestionBlock(
+  review: ReviewIssue,
+  platform: "github" | "gitlab" | undefined,
+): string | undefined {
   if (review.type !== "new") {
     return undefined;
   }
@@ -246,5 +337,56 @@ function buildSuggestionBlock(review: ReviewIssue): string | undefined {
     return undefined;
   }
 
+  if (platform === "gitlab") {
+    return ["```", sanitized, "```"].join("\n");
+  }
+
   return ["```suggestion", sanitized, "```"].join("\n");
+}
+
+function buildChangedFilesMermaid(files: DiffFileContext[]): string | undefined {
+  const uniquePaths = Array.from(
+    new Set(
+      files
+        .map((file) => file.newPath?.trim())
+        .filter((path): path is string => Boolean(path)),
+    ),
+  ).slice(0, 24);
+  if (uniquePaths.length === 0) {
+    return undefined;
+  }
+
+  const lines: string[] = ["```mermaid", "flowchart TD", '  PR["PR"]'];
+  const topNodeIds = new Map<string, string>();
+  const rootEdges = new Set<string>();
+
+  let index = 0;
+  for (const path of uniquePaths) {
+    const [firstSegment] = path.split("/", 1);
+    const topLevel = firstSegment && firstSegment.length > 0 ? firstSegment : "(root)";
+    let topNodeId = topNodeIds.get(topLevel);
+    if (!topNodeId) {
+      topNodeId = `T${topNodeIds.size + 1}`;
+      topNodeIds.set(topLevel, topNodeId);
+      lines.push(`  ${topNodeId}["${escapeMermaidLabel(topLevel)}"]`);
+    }
+
+    const rootEdge = `PR-->${topNodeId}`;
+    if (!rootEdges.has(rootEdge)) {
+      rootEdges.add(rootEdge);
+      lines.push(`  PR --> ${topNodeId}`);
+    }
+
+    index += 1;
+    const fileNodeId = `F${index}`;
+    lines.push(`  ${fileNodeId}["${escapeMermaidLabel(path)}"]`);
+    lines.push(`  ${topNodeId} --> ${fileNodeId}`);
+  }
+
+  lines.push("```");
+  return lines.join("\n");
+}
+
+function escapeMermaidLabel(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
