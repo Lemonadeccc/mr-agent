@@ -6,6 +6,8 @@ import {
   type ExpiringCacheEntry,
 } from "#core";
 import type { ReviewMode } from "#review";
+import { load as loadYaml } from "js-yaml";
+import { z } from "zod";
 import type {
   GitHubCheckRunCreateParams,
   GitHubRepositoryContentFile,
@@ -111,6 +113,55 @@ const DEFAULT_PULL_REQUEST_TEMPLATE_SECTIONS = extractTemplateSectionHeadings(
 );
 
 const policyConfigCache = new Map<string, RepoPolicyConfigCacheEntry>();
+
+const repoPolicyIssueSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    minBodyLength: z.number().int().optional(),
+    requiredSections: z.array(z.string()).optional(),
+  })
+  .strict()
+  .partial();
+
+const repoPolicyPullRequestSchema = repoPolicyIssueSchema
+  .extend({
+    requireLinkedIssue: z.boolean().optional(),
+  })
+  .strict()
+  .partial();
+
+const repoPolicyReviewSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    mode: z.enum(["comment", "report"]).optional(),
+    onOpened: z.boolean().optional(),
+    onEdited: z.boolean().optional(),
+    onSynchronize: z.boolean().optional(),
+    describeEnabled: z.boolean().optional(),
+    describeAllowApply: z.boolean().optional(),
+    checksCommandEnabled: z.boolean().optional(),
+    includeCiChecks: z.boolean().optional(),
+    secretScanEnabled: z.boolean().optional(),
+    autoLabelEnabled: z.boolean().optional(),
+    askCommandEnabled: z.boolean().optional(),
+    generateTestsCommandEnabled: z.boolean().optional(),
+    changelogCommandEnabled: z.boolean().optional(),
+    changelogAllowApply: z.boolean().optional(),
+    feedbackCommandEnabled: z.boolean().optional(),
+    customRules: z.array(z.string()).optional(),
+  })
+  .strict()
+  .partial();
+
+const repoPolicyConfigSchema = z
+  .object({
+    mode: z.enum(["remind", "enforce"]).optional(),
+    issue: repoPolicyIssueSchema.optional(),
+    pullRequest: repoPolicyPullRequestSchema.optional(),
+    review: repoPolicyReviewSchema.optional(),
+  })
+  .strict()
+  .partial();
 
 const defaultPolicyConfig: RepoPolicyConfig = {
   mode: "remind",
@@ -339,6 +390,8 @@ export async function resolveGitHubReviewBehaviorPolicy(params: {
   context: GitHubReviewContext;
   baseRef?: string;
 }): Promise<{
+  describeEnabled: boolean;
+  describeAllowApply: boolean;
   customRules: string[];
   includeCiChecks: boolean;
   checksCommandEnabled: boolean;
@@ -360,6 +413,8 @@ export async function resolveGitHubReviewBehaviorPolicy(params: {
   });
 
   return {
+    describeEnabled: config.review.describeEnabled,
+    describeAllowApply: config.review.describeAllowApply,
     customRules: config.review.customRules,
     includeCiChecks: config.review.includeCiChecks,
     checksCommandEnabled: config.review.checksCommandEnabled,
@@ -920,271 +975,358 @@ function normalizeRepoPolicyConfig(raw: Partial<RepoPolicyConfig>): RepoPolicyCo
   };
 }
 
-function parseRepoPolicyConfig(raw: string): Partial<RepoPolicyConfig> {
+export function parseRepoPolicyConfig(raw: string): Partial<RepoPolicyConfig> {
   const trimmed = raw.trim();
   if (!trimmed) {
     return {};
   }
 
   if (trimmed.startsWith("{")) {
-    return JSON.parse(trimmed) as Partial<RepoPolicyConfig>;
+    const parsedJson = JSON.parse(trimmed) as unknown;
+    const validated = repoPolicyConfigSchema.safeParse(parsedJson);
+    if (!validated.success) {
+      throw new Error(
+        `Invalid JSON policy config: ${validated.error.issues[0]?.message ?? "schema validation failed"}`,
+      );
+    }
+    return validated.data as Partial<RepoPolicyConfig>;
   }
 
   return parseSimpleYamlPolicyConfig(trimmed);
 }
 
 function parseSimpleYamlPolicyConfig(yamlText: string): Partial<RepoPolicyConfig> {
+  let parsed: unknown;
+  try {
+    parsed = loadYaml(yamlText, { json: true });
+  } catch (error) {
+    throw new Error(
+      `Invalid YAML policy config: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  if (parsed === null || parsed === undefined) {
+    return {};
+  }
+
+  const root = asRecord(parsed);
+  if (!root) {
+    throw new Error("Invalid YAML policy config: root must be a mapping object");
+  }
+
+  const normalized = normalizeYamlPolicyRoot(root);
+  const validated = repoPolicyConfigSchema.safeParse(normalized);
+  if (!validated.success) {
+    throw new Error(
+      `Invalid YAML policy config: ${validated.error.issues[0]?.message ?? "schema validation failed"}`,
+    );
+  }
+  return validated.data as Partial<RepoPolicyConfig>;
+}
+
+function normalizeYamlPolicyRoot(
+  root: Record<string, unknown>,
+): Partial<RepoPolicyConfig> {
   const result: Partial<RepoPolicyConfig> = {};
-  const issue: Partial<PolicySectionConfig> = {};
-  const pullRequest: Partial<PullRequestPolicySectionConfig> = {};
-  const review: Partial<ReviewPolicyConfig> = {};
-  let currentSection: "root" | "issue" | "pullRequest" | "review" = "root";
-  let listTarget:
-    | "issueRequiredSections"
-    | "pullRequestRequiredSections"
-    | "reviewCustomRules"
-    | undefined;
 
-  for (const rawLine of yamlText.split("\n")) {
-    const line = stripYamlComment(rawLine);
-    if (!line.trim()) {
-      continue;
-    }
+  const mode = parsePolicyModeFromUnknown(root.mode);
+  if (mode) {
+    result.mode = mode;
+  }
 
-    const indent = rawLine.length - rawLine.trimStart().length;
-    const text = line.trim();
-
-    if (text.startsWith("- ")) {
-      const item = text.slice(2).trim();
-      if (!item || !listTarget) {
-        continue;
-      }
-
-      if (listTarget === "issueRequiredSections") {
-        issue.requiredSections = [...(issue.requiredSections ?? []), stripYamlQuotes(item)];
-      } else if (listTarget === "reviewCustomRules") {
-        review.customRules = [...(review.customRules ?? []), stripYamlQuotes(item)];
-      } else {
-        pullRequest.requiredSections = [
-          ...(pullRequest.requiredSections ?? []),
-          stripYamlQuotes(item),
-        ];
-      }
-      continue;
-    }
-
-    const separatorIndex = text.indexOf(":");
-    if (separatorIndex < 0) {
-      continue;
-    }
-
-    const key = text.slice(0, separatorIndex).trim();
-    const valueRaw = text.slice(separatorIndex + 1).trim();
-    if (indent === 0) {
-      listTarget = undefined;
-      if (key === "issue" && valueRaw === "") {
-        currentSection = "issue";
-        continue;
-      }
-      if (
-        (key === "pullRequest" || key === "pull_request") &&
-        valueRaw === ""
-      ) {
-        currentSection = "pullRequest";
-        continue;
-      }
-      if (key === "review" && valueRaw === "") {
-        currentSection = "review";
-        continue;
-      }
-      currentSection = "root";
-
-      if (key === "mode") {
-        result.mode = parsePolicyMode(valueRaw);
-      }
-      continue;
-    }
-
-    if (currentSection === "issue") {
-      if (key === "requiredSections" && valueRaw === "") {
-        listTarget = "issueRequiredSections";
-        issue.requiredSections = issue.requiredSections ?? [];
-        continue;
-      }
-      listTarget = undefined;
-      applySectionConfigKey(issue, key, valueRaw);
-      continue;
-    }
-
-    if (currentSection === "pullRequest") {
-      if (key === "requiredSections" && valueRaw === "") {
-        listTarget = "pullRequestRequiredSections";
-        pullRequest.requiredSections = pullRequest.requiredSections ?? [];
-        continue;
-      }
-      listTarget = undefined;
-      if (key === "requireLinkedIssue") {
-        pullRequest.requireLinkedIssue = parseYamlBoolean(valueRaw);
-        continue;
-      }
-      applySectionConfigKey(pullRequest, key, valueRaw);
-      continue;
-    }
-
-    if (currentSection === "review") {
-      listTarget = undefined;
-      if (key === "customRules" && valueRaw === "") {
-        listTarget = "reviewCustomRules";
-        review.customRules = review.customRules ?? [];
-        continue;
-      }
-      applyReviewConfigKey(review, key, valueRaw);
+  const issue = asRecord(root.issue);
+  if (issue) {
+    const normalizedIssue = normalizeYamlSectionConfig(issue);
+    if (Object.keys(normalizedIssue).length > 0) {
+      result.issue = normalizedIssue as PolicySectionConfig;
     }
   }
 
-  if (Object.keys(issue).length > 0) {
-    result.issue = issue as PolicySectionConfig;
+  const pullRequest = asRecord(root.pullRequest) ?? asRecord(root.pull_request);
+  if (pullRequest) {
+    const normalizedPullRequest = normalizeYamlPullRequestSection(pullRequest);
+    if (Object.keys(normalizedPullRequest).length > 0) {
+      result.pullRequest = normalizedPullRequest as PullRequestPolicySectionConfig;
+    }
   }
-  if (Object.keys(pullRequest).length > 0) {
-    result.pullRequest = pullRequest as PullRequestPolicySectionConfig;
-  }
-  if (Object.keys(review).length > 0) {
-    result.review = review as ReviewPolicyConfig;
+
+  const review = asRecord(root.review);
+  if (review) {
+    const normalizedReview = normalizeYamlReviewConfig(review);
+    if (Object.keys(normalizedReview).length > 0) {
+      result.review = normalizedReview as ReviewPolicyConfig;
+    }
   }
 
   return result;
 }
 
-function applyReviewConfigKey(
-  target: Partial<ReviewPolicyConfig>,
-  key: string,
-  valueRaw: string,
-): void {
-  if (key === "enabled") {
-    target.enabled = parseYamlBoolean(valueRaw);
-    return;
+function normalizeYamlSectionConfig(
+  raw: Record<string, unknown>,
+): Partial<PolicySectionConfig> {
+  const target: Partial<PolicySectionConfig> = {};
+  for (const [rawKey, rawValue] of Object.entries(raw)) {
+    const key = normalizeYamlConfigKey(rawKey);
+    if (key === "enabled") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.enabled = bool;
+      }
+      continue;
+    }
+    if (key === "minbodylength") {
+      const number = coerceNumber(rawValue);
+      if (number !== undefined) {
+        target.minBodyLength = number;
+      }
+      continue;
+    }
+    if (key === "requiredsections") {
+      const list = coerceStringList(rawValue);
+      if (list) {
+        target.requiredSections = list;
+      }
+    }
   }
-
-  if (key === "mode") {
-    target.mode = parseReviewMode(valueRaw);
-    return;
-  }
-
-  if (key === "onOpened" || key === "on_opened") {
-    target.onOpened = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (key === "onEdited" || key === "on_edited") {
-    target.onEdited = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (key === "onSynchronize" || key === "on_synchronize") {
-    target.onSynchronize = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (key === "describeEnabled" || key === "describe_enabled") {
-    target.describeEnabled = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (key === "describeAllowApply" || key === "describe_allow_apply") {
-    target.describeAllowApply = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (key === "checksCommandEnabled" || key === "checks_command_enabled") {
-    target.checksCommandEnabled = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (key === "includeCiChecks" || key === "include_ci_checks") {
-    target.includeCiChecks = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (key === "secretScanEnabled" || key === "secret_scan_enabled") {
-    target.secretScanEnabled = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (key === "autoLabelEnabled" || key === "auto_label_enabled") {
-    target.autoLabelEnabled = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (key === "askCommandEnabled" || key === "ask_command_enabled") {
-    target.askCommandEnabled = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (
-    key === "generateTestsCommandEnabled" ||
-    key === "generate_tests_command_enabled"
-  ) {
-    target.generateTestsCommandEnabled = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (key === "changelogCommandEnabled" || key === "changelog_command_enabled") {
-    target.changelogCommandEnabled = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (key === "changelogAllowApply" || key === "changelog_allow_apply") {
-    target.changelogAllowApply = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (key === "feedbackCommandEnabled" || key === "feedback_command_enabled") {
-    target.feedbackCommandEnabled = parseYamlBoolean(valueRaw);
-    return;
-  }
-
-  if (key === "customRules" && valueRaw.startsWith("[")) {
-    target.customRules = valueRaw
-      .replace(/^\[/, "")
-      .replace(/\]$/, "")
-      .split(",")
-      .map((item) => stripYamlQuotes(item.trim()))
-      .filter(Boolean);
-  }
+  return target;
 }
 
-function applySectionConfigKey(
-  target: Partial<PolicySectionConfig>,
-  key: string,
-  valueRaw: string,
-): void {
-  if (key === "enabled") {
-    target.enabled = parseYamlBoolean(valueRaw);
-    return;
+function normalizeYamlPullRequestSection(
+  raw: Record<string, unknown>,
+): Partial<PullRequestPolicySectionConfig> {
+  const target = normalizeYamlSectionConfig(raw) as Partial<PullRequestPolicySectionConfig>;
+  for (const [rawKey, rawValue] of Object.entries(raw)) {
+    const key = normalizeYamlConfigKey(rawKey);
+    if (key === "requirelinkedissue") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.requireLinkedIssue = bool;
+      }
+    }
   }
-
-  if (key === "minBodyLength" || key === "min_body_length") {
-    target.minBodyLength = parseYamlNumber(valueRaw);
-    return;
-  }
-
-  if (key === "requiredSections" && valueRaw.startsWith("[")) {
-    target.requiredSections = valueRaw
-      .replace(/^\[/, "")
-      .replace(/\]$/, "")
-      .split(",")
-      .map((item) => stripYamlQuotes(item.trim()))
-      .filter(Boolean);
-  }
+  return target;
 }
 
-function stripYamlComment(line: string): string {
-  const commentIndex = line.indexOf("#");
-  if (commentIndex < 0) {
-    return line;
+function normalizeYamlReviewConfig(
+  raw: Record<string, unknown>,
+): Partial<ReviewPolicyConfig> {
+  const target: Partial<ReviewPolicyConfig> = {};
+  for (const [rawKey, rawValue] of Object.entries(raw)) {
+    const key = normalizeYamlConfigKey(rawKey);
+    if (key === "enabled") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.enabled = bool;
+      }
+      continue;
+    }
+    if (key === "mode") {
+      const mode = parseReviewModeFromUnknown(rawValue);
+      if (mode) {
+        target.mode = mode;
+      }
+      continue;
+    }
+    if (key === "onopened") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.onOpened = bool;
+      }
+      continue;
+    }
+    if (key === "onedited") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.onEdited = bool;
+      }
+      continue;
+    }
+    if (key === "onsynchronize") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.onSynchronize = bool;
+      }
+      continue;
+    }
+    if (key === "describeenabled") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.describeEnabled = bool;
+      }
+      continue;
+    }
+    if (key === "describeallowapply") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.describeAllowApply = bool;
+      }
+      continue;
+    }
+    if (key === "checkscommandenabled") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.checksCommandEnabled = bool;
+      }
+      continue;
+    }
+    if (key === "includecichecks") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.includeCiChecks = bool;
+      }
+      continue;
+    }
+    if (key === "secretscanenabled") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.secretScanEnabled = bool;
+      }
+      continue;
+    }
+    if (key === "autolabelenabled") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.autoLabelEnabled = bool;
+      }
+      continue;
+    }
+    if (key === "askcommandenabled") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.askCommandEnabled = bool;
+      }
+      continue;
+    }
+    if (key === "generatetestscommandenabled") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.generateTestsCommandEnabled = bool;
+      }
+      continue;
+    }
+    if (key === "changelogcommandenabled") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.changelogCommandEnabled = bool;
+      }
+      continue;
+    }
+    if (key === "changelogallowapply") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.changelogAllowApply = bool;
+      }
+      continue;
+    }
+    if (key === "feedbackcommandenabled") {
+      const bool = coerceBoolean(rawValue);
+      if (bool !== undefined) {
+        target.feedbackCommandEnabled = bool;
+      }
+      continue;
+    }
+    if (key === "customrules") {
+      const list = coerceStringList(rawValue);
+      if (list) {
+        target.customRules = list;
+      }
+    }
   }
 
-  return line.slice(0, commentIndex);
+  return target;
+}
+
+function normalizeYamlConfigKey(rawKey: string): string {
+  return rawKey.trim().toLowerCase().replace(/[_-]/g, "");
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function coerceBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (value === 1) {
+      return true;
+    }
+    if (value === 0) {
+      return false;
+    }
+    return undefined;
+  }
+  if (typeof value === "string") {
+    return parseYamlBooleanMaybe(value);
+  }
+  return undefined;
+}
+
+function coerceNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.floor(value);
+  }
+  if (typeof value === "string") {
+    const parsed = Number(stripYamlQuotes(value));
+    if (Number.isFinite(parsed)) {
+      return Math.floor(parsed);
+    }
+  }
+  return undefined;
+}
+
+function coerceStringList(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) {
+    const list = value
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter(Boolean);
+    return list.length > 0 ? list : undefined;
+  }
+  if (typeof value === "string") {
+    const trimmed = stripYamlQuotes(value).trim();
+    if (!trimmed) {
+      return undefined;
+    }
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      const parsed = trimmed
+        .slice(1, -1)
+        .split(",")
+        .map((item) => stripYamlQuotes(item).trim())
+        .filter(Boolean);
+      return parsed.length > 0 ? parsed : undefined;
+    }
+    return [trimmed];
+  }
+  return undefined;
+}
+
+function parsePolicyModeFromUnknown(value: unknown): PolicyMode | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  return parsePolicyMode(value);
+}
+
+function parseReviewModeFromUnknown(value: unknown): ReviewMode | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  return parseReviewMode(value);
+}
+
+function parseYamlBooleanMaybe(value: string): boolean | undefined {
+  const normalized = stripYamlQuotes(value).trim().toLowerCase();
+  if (["true", "yes", "on", "1"].includes(normalized)) {
+    return true;
+  }
+  if (["false", "no", "off", "0"].includes(normalized)) {
+    return false;
+  }
+  return undefined;
 }
 
 function stripYamlQuotes(value: string): string {
@@ -1199,13 +1341,8 @@ function stripYamlQuotes(value: string): string {
   return trimmed;
 }
 
-function parseYamlBoolean(value: string): boolean {
-  return stripYamlQuotes(value).toLowerCase() === "true";
-}
-
-function parseYamlNumber(value: string): number {
-  const parsed = Number(stripYamlQuotes(value));
-  return Number.isFinite(parsed) ? Math.floor(parsed) : 0;
+export function parseYamlBoolean(value: string): boolean {
+  return parseYamlBooleanMaybe(value) ?? false;
 }
 
 function parsePolicyMode(value: string): PolicyMode {

@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import type {
@@ -6,9 +7,20 @@ import type {
   PullRequestReviewResult,
 } from "./review-types.js";
 import { isProcessTemplateFile } from "./review-policy.js";
+import type { AskConversationTurn } from "#core";
 import { fetchWithRetry, readNumberEnv } from "#core";
 
 type AIProvider = "openai" | "openai-compatible" | "anthropic" | "gemini";
+
+interface OpenAIClientCacheConfig {
+  apiKey: string;
+  baseURL?: string;
+  timeout: number;
+  maxRetries: number;
+}
+
+const openAIClientCache = new Map<string, OpenAI>();
+const DEFAULT_MAX_OPENAI_CLIENT_CACHE_ENTRIES = 200;
 
 const reviewIssueSchema = z.object({
   severity: z.enum(["low", "medium", "high"]),
@@ -120,6 +132,66 @@ const ASK_SYSTEM_PROMPT = [
   "输出必须是 JSON 对象，格式为 {\"answer\":\"...\"}，不要 markdown 代码块。",
 ].join("\n");
 
+export function openAIClientCacheKey(params: OpenAIClientCacheConfig): string {
+  return [
+    hashApiKey(params.apiKey),
+    params.baseURL ?? "",
+    `${params.timeout}`,
+    `${params.maxRetries}`,
+  ].join("|");
+}
+
+export function getOpenAIClientFromCache(params: OpenAIClientCacheConfig): OpenAI {
+  const key = openAIClientCacheKey(params);
+  const cached = openAIClientCache.get(key);
+  if (cached) {
+    return cached;
+  }
+
+  const created = new OpenAI(
+    params.baseURL
+      ? {
+          apiKey: params.apiKey,
+          baseURL: params.baseURL,
+          timeout: params.timeout,
+          maxRetries: params.maxRetries,
+        }
+      : {
+          apiKey: params.apiKey,
+          timeout: params.timeout,
+          maxRetries: params.maxRetries,
+        },
+  );
+  openAIClientCache.set(key, created);
+  trimOpenAIClientCache();
+  return created;
+}
+
+export function __clearOpenAIClientCacheForTests(): void {
+  openAIClientCache.clear();
+}
+
+function hashApiKey(apiKey: string): string {
+  return createHash("sha256").update(apiKey).digest("hex");
+}
+
+function trimOpenAIClientCache(): void {
+  const maxEntries = Math.max(
+    1,
+    readNumberEnv(
+      "MAX_OPENAI_CLIENT_CACHE_ENTRIES",
+      DEFAULT_MAX_OPENAI_CLIENT_CACHE_ENTRIES,
+    ),
+  );
+  while (openAIClientCache.size > maxEntries) {
+    const oldest = openAIClientCache.keys().next();
+    if (oldest.done) {
+      break;
+    }
+    openAIClientCache.delete(oldest.value);
+  }
+}
+
 export async function analyzePullRequest(
   pullRequest: PullRequestReviewInput,
 ): Promise<PullRequestReviewResult> {
@@ -156,10 +228,17 @@ export async function analyzePullRequest(
 export async function answerPullRequestQuestion(
   pullRequest: PullRequestReviewInput,
   question: string,
+  options?: {
+    conversation?: AskConversationTurn[];
+  },
 ): Promise<string> {
   const provider = resolveProvider();
   const model = resolveModel(provider);
-  const prompt = buildAskPrompt(pullRequest, question);
+  const prompt = buildAskPrompt(
+    pullRequest,
+    question,
+    options?.conversation ?? [],
+  );
 
   let parsed: unknown;
   if (provider === "openai" || provider === "openai-compatible") {
@@ -174,71 +253,9 @@ export async function answerPullRequestQuestion(
   return result.answer.trim();
 }
 
-function buildUserPrompt(pullRequest: PullRequestReviewInput): string {
-  const processFiles = pullRequest.changedFiles.filter(
-    (file) =>
-      isProcessTemplateFile(file.newPath, pullRequest.platform) ||
-      isProcessTemplateFile(file.oldPath, pullRequest.platform),
-  );
-
-  const processFilesText =
-    processFiles.length === 0
-      ? "(none)"
-      : processFiles
-          .map((file) => `- ${file.newPath} (status=${file.status})`)
-          .join("\n");
-
-  const filesText = pullRequest.changedFiles
-    .map((file, index) => {
-      return [
-        `### File ${index + 1}`,
-        `new_path=${file.newPath}`,
-        `old_path=${file.oldPath}`,
-        `status=${file.status}, additions=${file.additions}, deletions=${file.deletions}`,
-        "```diff",
-        file.extendedDiff,
-        "```",
-      ].join("\n");
-    })
-    .join("\n\n");
-
-  const guidelinesText =
-    pullRequest.processGuidelines && pullRequest.processGuidelines.length > 0
-      ? pullRequest.processGuidelines
-          .map((item, index) => {
-            return [
-              `### Guideline ${index + 1}`,
-              `path=${item.path}`,
-              "```text",
-              item.content.slice(0, 2_000),
-              "```",
-            ].join("\n");
-          })
-          .join("\n\n")
-      : "(none)";
-
-  const customRulesText =
-    pullRequest.customRules && pullRequest.customRules.length > 0
-      ? pullRequest.customRules.map((rule) => `- ${rule}`).join("\n")
-      : "(none)";
-
-  const feedbackSignalsText =
-    pullRequest.feedbackSignals && pullRequest.feedbackSignals.length > 0
-      ? pullRequest.feedbackSignals.map((signal) => `- ${signal}`).join("\n")
-      : "(none)";
-
-  const ciChecksText =
-    pullRequest.ciChecks && pullRequest.ciChecks.length > 0
-      ? pullRequest.ciChecks
-          .slice(0, 30)
-          .map((item) => {
-            const url = item.detailsUrl ? `, url=${item.detailsUrl}` : "";
-            const summary = item.summary ? `\n  summary=${item.summary}` : "";
-            return `- ${item.name} (status=${item.status}, conclusion=${item.conclusion}${url})${summary}`;
-          })
-          .join("\n")
-      : "(none)";
-
+function buildPromptHeaderAndDescription(
+  pullRequest: PullRequestReviewInput,
+): string[] {
   return [
     `Platform: ${pullRequest.platform}`,
     `Repository: ${pullRequest.repository}`,
@@ -251,24 +268,136 @@ function buildUserPrompt(pullRequest: PullRequestReviewInput): string {
     "Description:",
     pullRequest.body || "(empty)",
     "",
-    "Process/template files in this change:",
-    processFilesText,
-    "",
-    "Repository process guidelines (.github templates/workflows/etc):",
-    guidelinesText,
-    "",
-    "Team custom review rules:",
-    customRulesText,
-    "",
-    "Feedback signals from developers:",
-    feedbackSignalsText,
-    "",
-    "CI checks on current head:",
-    ciChecksText,
-    "",
-    "Diff with line mapping:",
-    filesText || "(no textual patch available)",
-    "",
+  ];
+}
+
+function formatDiffFilesForPrompt(
+  files: PullRequestReviewInput["changedFiles"],
+  maxFiles: number | undefined,
+): string {
+  const selectedFiles = maxFiles ? files.slice(0, maxFiles) : files;
+  return selectedFiles
+    .map((file, index) => {
+      return [
+        `### File ${index + 1}`,
+        `new_path=${file.newPath}`,
+        `old_path=${file.oldPath}`,
+        `status=${file.status}, additions=${file.additions}, deletions=${file.deletions}`,
+        "```diff",
+        file.extendedDiff,
+        "```",
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+function formatGuidelinesForPrompt(
+  processGuidelines: PullRequestReviewInput["processGuidelines"],
+): string {
+  if (!processGuidelines || processGuidelines.length === 0) {
+    return "(none)";
+  }
+
+  return processGuidelines
+    .map((item, index) => {
+      return [
+        `### Guideline ${index + 1}`,
+        `path=${item.path}`,
+        "```text",
+        item.content.slice(0, 2_000),
+        "```",
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+function formatStringListForPrompt(items: string[] | undefined): string {
+  if (!items || items.length === 0) {
+    return "(none)";
+  }
+  return items.map((item) => `- ${item}`).join("\n");
+}
+
+function formatCiChecksForPrompt(
+  ciChecks: PullRequestReviewInput["ciChecks"],
+): string {
+  if (!ciChecks || ciChecks.length === 0) {
+    return "(none)";
+  }
+
+  return ciChecks
+    .slice(0, 30)
+    .map((item) => {
+      const url = item.detailsUrl ? `, url=${item.detailsUrl}` : "";
+      const summary = item.summary ? `\n  summary=${item.summary}` : "";
+      return `- ${item.name} (status=${item.status}, conclusion=${item.conclusion}${url})${summary}`;
+    })
+    .join("\n");
+}
+
+function formatProcessFilesForPrompt(pullRequest: PullRequestReviewInput): string {
+  const processFiles = pullRequest.changedFiles.filter(
+    (file) =>
+      isProcessTemplateFile(file.newPath, pullRequest.platform) ||
+      isProcessTemplateFile(file.oldPath, pullRequest.platform),
+  );
+  if (processFiles.length === 0) {
+    return "(none)";
+  }
+
+  return processFiles
+    .map((file) => `- ${file.newPath} (status=${file.status})`)
+    .join("\n");
+}
+
+function buildPromptSharedSections(params: {
+  pullRequest: PullRequestReviewInput;
+  maxDiffFiles?: number;
+  includeProcessFiles: boolean;
+}): string[] {
+  const { pullRequest, maxDiffFiles, includeProcessFiles } = params;
+  const sections: string[] = [...buildPromptHeaderAndDescription(pullRequest)];
+
+  if (includeProcessFiles) {
+    const processFilesText = formatProcessFilesForPrompt(pullRequest);
+    sections.push("Process/template files in this change:");
+    sections.push(processFilesText);
+    sections.push("");
+  }
+
+  const guidelinesText = formatGuidelinesForPrompt(pullRequest.processGuidelines);
+  const customRulesText = formatStringListForPrompt(pullRequest.customRules);
+  const feedbackSignalsText = formatStringListForPrompt(
+    pullRequest.feedbackSignals,
+  );
+  const ciChecksText = formatCiChecksForPrompt(pullRequest.ciChecks);
+  const filesText = formatDiffFilesForPrompt(pullRequest.changedFiles, maxDiffFiles);
+
+  sections.push("Repository process guidelines (.github templates/workflows/etc):");
+  sections.push(guidelinesText);
+  sections.push("");
+  sections.push("Team custom review rules:");
+  sections.push(customRulesText);
+  sections.push("");
+  sections.push("Feedback signals from developers:");
+  sections.push(feedbackSignalsText);
+  sections.push("");
+  sections.push("CI checks on current head:");
+  sections.push(ciChecksText);
+  sections.push("");
+  sections.push("Diff with line mapping:");
+  sections.push(filesText || "(no textual patch available)");
+  sections.push("");
+  return sections;
+}
+
+export function buildUserPrompt(pullRequest: PullRequestReviewInput): string {
+  return [
+    ...buildPromptSharedSections({
+      pullRequest,
+      maxDiffFiles: undefined,
+      includeProcessFiles: true,
+    }),
     "输出要求:",
     "1) 仅输出 JSON 对象；",
     "2) reviews 每项都要填 newPath/oldPath/type/startLine/endLine；",
@@ -282,94 +411,45 @@ function buildUserPrompt(pullRequest: PullRequestReviewInput): string {
   ].join("\n");
 }
 
-function buildAskPrompt(
+export function buildAskPrompt(
   pullRequest: PullRequestReviewInput,
   question: string,
+  conversation: AskConversationTurn[] = [],
 ): string {
-  const filesText = pullRequest.changedFiles
-    .slice(0, 40)
-    .map((file, index) => {
-      return [
-        `### File ${index + 1}`,
-        `new_path=${file.newPath}`,
-        `old_path=${file.oldPath}`,
-        `status=${file.status}, additions=${file.additions}, deletions=${file.deletions}`,
-        "```diff",
-        file.extendedDiff,
-        "```",
-      ].join("\n");
-    })
-    .join("\n\n");
-
-  const guidelinesText =
-    pullRequest.processGuidelines && pullRequest.processGuidelines.length > 0
-      ? pullRequest.processGuidelines
-          .map((item, index) => {
-            return [
-              `### Guideline ${index + 1}`,
-              `path=${item.path}`,
-              "```text",
-              item.content.slice(0, 2_000),
-              "```",
-            ].join("\n");
-          })
-          .join("\n\n")
-      : "(none)";
-
-  const customRulesText =
-    pullRequest.customRules && pullRequest.customRules.length > 0
-      ? pullRequest.customRules.map((rule) => `- ${rule}`).join("\n")
-      : "(none)";
-
-  const feedbackSignalsText =
-    pullRequest.feedbackSignals && pullRequest.feedbackSignals.length > 0
-      ? pullRequest.feedbackSignals.map((signal) => `- ${signal}`).join("\n")
-      : "(none)";
-
-  const ciChecksText =
-    pullRequest.ciChecks && pullRequest.ciChecks.length > 0
-      ? pullRequest.ciChecks
-          .slice(0, 30)
-          .map((item) => {
-            const url = item.detailsUrl ? `, url=${item.detailsUrl}` : "";
-            const summary = item.summary ? `\n  summary=${item.summary}` : "";
-            return `- ${item.name} (status=${item.status}, conclusion=${item.conclusion}${url})${summary}`;
-          })
-          .join("\n")
-      : "(none)";
-
+  const conversationText = formatAskConversationForPrompt(conversation);
   return [
-    `Platform: ${pullRequest.platform}`,
-    `Repository: ${pullRequest.repository}`,
-    `Number: #${pullRequest.number}`,
-    `Title: ${pullRequest.title}`,
-    `Author: ${pullRequest.author}`,
-    `Base -> Head: ${pullRequest.baseBranch} -> ${pullRequest.headBranch}`,
-    `Additions: ${pullRequest.additions}, Deletions: ${pullRequest.deletions}, Changed files: ${pullRequest.changedFilesCount}`,
-    "",
-    "Description:",
-    pullRequest.body || "(empty)",
-    "",
-    "Repository process guidelines (.github templates/workflows/etc):",
-    guidelinesText,
-    "",
-    "Team custom review rules:",
-    customRulesText,
-    "",
-    "Feedback signals from developers:",
-    feedbackSignalsText,
-    "",
-    "CI checks on current head:",
-    ciChecksText,
-    "",
-    "Diff with line mapping:",
-    filesText || "(no textual patch available)",
+    ...buildPromptSharedSections({
+      pullRequest,
+      maxDiffFiles: 40,
+      includeProcessFiles: false,
+    }),
+    "Previous Q&A context:",
+    conversationText,
     "",
     "用户问题：",
     question.trim(),
     "",
     "输出要求：仅返回 JSON 对象 {\"answer\":\"...\"}。",
   ].join("\n");
+}
+
+function formatAskConversationForPrompt(conversation: AskConversationTurn[]): string {
+  if (!conversation || conversation.length === 0) {
+    return "(none)";
+  }
+
+  return conversation
+    .slice(-6)
+    .map((turn, index) => {
+      const question = turn.question.trim();
+      const answer = turn.answer.trim();
+      return [
+        `### Turn ${index + 1}`,
+        `Q: ${question || "(empty)"}`,
+        `A: ${answer || "(empty)"}`,
+      ].join("\n");
+    })
+    .join("\n\n");
 }
 
 function resolveProvider(): AIProvider {
@@ -446,11 +526,12 @@ async function analyzeWithOpenAI(params: {
 
   const timeout = readNumberEnv("AI_HTTP_TIMEOUT_MS", 30_000);
   const maxRetries = readNumberEnv("AI_HTTP_RETRIES", 2);
-  const client = new OpenAI(
-    baseURL
-      ? { apiKey, baseURL, timeout, maxRetries }
-      : { apiKey, timeout, maxRetries },
-  );
+  const client = getOpenAIClientFromCache({
+    apiKey,
+    baseURL,
+    timeout,
+    maxRetries,
+  });
 
   try {
     const completion = await client.chat.completions.create({
@@ -480,7 +561,10 @@ async function analyzeWithOpenAI(params: {
       extractText(completion.choices[0]?.message.content),
     );
   } catch (error) {
-    if (params.provider !== "openai-compatible") {
+    if (
+      params.provider !== "openai-compatible" ||
+      !shouldFallbackToJsonObject(error)
+    ) {
       throw error;
     }
 
@@ -512,129 +596,24 @@ async function analyzeWithAnthropic(params: {
   model: string;
   prompt: string;
 }): Promise<unknown> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error("Missing ANTHROPIC_API_KEY");
-  }
-
-  const response = await fetchWithRetry(
-    "https://api.anthropic.com/v1/messages",
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: params.model,
-        max_tokens: Math.max(1, readNumberEnv("ANTHROPIC_MAX_TOKENS", 4_096)),
-        temperature: 0.2,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: params.prompt }],
-      }),
-    },
-    {
-      timeoutMs: readNumberEnv("AI_HTTP_TIMEOUT_MS", 30_000),
-      retries: readNumberEnv("AI_HTTP_RETRIES", 2),
-      backoffMs: readNumberEnv("AI_HTTP_RETRY_BACKOFF_MS", 400),
-    },
-  );
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(
-      `Anthropic API error (${response.status}): ${body.slice(0, 300)}`,
-    );
-  }
-
-  const payload = (await response.json()) as {
-    content?: Array<{ type?: string; text?: string }>;
-  };
-  const text =
-    payload.content
-      ?.filter((item) => item.type === "text" && typeof item.text === "string")
-      .map((item) => item.text as string)
-      .join("\n")
-      .trim() ?? "";
-
-  if (!text) {
-    throw new Error("Anthropic response has no text content");
-  }
-
-  return parseJsonFromModelText(text);
+  return callAnthropicJson({
+    model: params.model,
+    prompt: params.prompt,
+    systemPrompt: SYSTEM_PROMPT,
+    responseSchema: reviewResultJsonSchema,
+  });
 }
 
 async function analyzeWithGemini(params: {
   model: string;
   prompt: string;
 }): Promise<unknown> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("Missing GEMINI_API_KEY");
-  }
-
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    params.model,
-  )}:generateContent`;
-
-  const response = await fetchWithRetry(
-    endpoint,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-goog-api-key": apiKey,
-      },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [{ text: SYSTEM_PROMPT }],
-        },
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: params.prompt }],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.2,
-          responseMimeType: "application/json",
-        },
-      }),
-    },
-    {
-      timeoutMs: readNumberEnv("AI_HTTP_TIMEOUT_MS", 30_000),
-      retries: readNumberEnv("AI_HTTP_RETRIES", 2),
-      backoffMs: readNumberEnv("AI_HTTP_RETRY_BACKOFF_MS", 400),
-    },
-  );
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(
-      `Gemini API error (${response.status}): ${body.slice(0, 300)}`,
-    );
-  }
-
-  const payload = (await response.json()) as {
-    candidates?: Array<{
-      content?: {
-        parts?: Array<{ text?: string }>;
-      };
-    }>;
-  };
-
-  const text =
-    payload.candidates?.[0]?.content?.parts
-      ?.map((part) => part.text ?? "")
-      .join("\n")
-      .trim() ?? "";
-
-  if (!text) {
-    throw new Error("Gemini response has no text content");
-  }
-
-  return parseJsonFromModelText(text);
+  return callGeminiJson({
+    model: params.model,
+    prompt: params.prompt,
+    systemPrompt: SYSTEM_PROMPT,
+    responseSchema: reviewResultJsonSchema,
+  });
 }
 
 async function askWithOpenAI(params: {
@@ -664,11 +643,12 @@ async function askWithOpenAI(params: {
 
   const timeout = readNumberEnv("AI_HTTP_TIMEOUT_MS", 30_000);
   const maxRetries = readNumberEnv("AI_HTTP_RETRIES", 2);
-  const client = new OpenAI(
-    baseURL
-      ? { apiKey, baseURL, timeout, maxRetries }
-      : { apiKey, timeout, maxRetries },
-  );
+  const client = getOpenAIClientFromCache({
+    apiKey,
+    baseURL,
+    timeout,
+    maxRetries,
+  });
 
   try {
     const completion = await client.chat.completions.create({
@@ -698,7 +678,10 @@ async function askWithOpenAI(params: {
       extractText(completion.choices[0]?.message.content),
     );
   } catch (error) {
-    if (params.provider !== "openai-compatible") {
+    if (
+      params.provider !== "openai-compatible" ||
+      !shouldFallbackToJsonObject(error)
+    ) {
       throw error;
     }
 
@@ -726,38 +709,147 @@ async function askWithOpenAI(params: {
   }
 }
 
+export function shouldFallbackToJsonObject(error: unknown): boolean {
+  if (readErrorStatus(error) !== 400) {
+    return false;
+  }
+
+  const message = collectErrorText(error).toLowerCase();
+  if (!message) {
+    return false;
+  }
+
+  const mentionsResponseFormat = message.includes("response_format");
+  const mentionsJsonSchema =
+    message.includes("json_schema") || message.includes("json schema");
+  if (!mentionsResponseFormat && !mentionsJsonSchema) {
+    return false;
+  }
+
+  return (
+    message.includes("unsupported") ||
+    message.includes("not support") ||
+    message.includes("not implemented")
+  );
+}
+
+function readErrorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined;
+  }
+
+  const candidate = (error as { status?: unknown }).status;
+  return typeof candidate === "number" ? candidate : undefined;
+}
+
+function collectErrorText(error: unknown): string {
+  if (typeof error === "string") {
+    return error;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (!error || typeof error !== "object") {
+    return "";
+  }
+
+  const bucket: string[] = [];
+  const root = error as {
+    message?: unknown;
+    error?: { message?: unknown };
+    response?: { data?: { error?: { message?: unknown } } };
+  };
+
+  if (typeof root.message === "string") {
+    bucket.push(root.message);
+  }
+  if (typeof root.error?.message === "string") {
+    bucket.push(root.error.message);
+  }
+  if (typeof root.response?.data?.error?.message === "string") {
+    bucket.push(root.response.data.error.message);
+  }
+
+  return bucket.join(" ");
+}
+
 async function askWithAnthropic(params: {
   model: string;
   prompt: string;
+}): Promise<unknown> {
+  return callAnthropicJson({
+    model: params.model,
+    prompt: params.prompt,
+    systemPrompt: ASK_SYSTEM_PROMPT,
+    responseSchema: askResultJsonSchema,
+  });
+}
+
+async function askWithGemini(params: {
+  model: string;
+  prompt: string;
+}): Promise<unknown> {
+  return callGeminiJson({
+    model: params.model,
+    prompt: params.prompt,
+    systemPrompt: ASK_SYSTEM_PROMPT,
+    responseSchema: askResultJsonSchema,
+  });
+}
+
+async function callAnthropicJson(params: {
+  model: string;
+  prompt: string;
+  systemPrompt: string;
+  responseSchema?: Record<string, unknown>;
 }): Promise<unknown> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new Error("Missing ANTHROPIC_API_KEY");
   }
 
-  const response = await fetchWithRetry(
-    "https://api.anthropic.com/v1/messages",
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
+  const requestOptions = {
+    timeoutMs: readNumberEnv("AI_HTTP_TIMEOUT_MS", 30_000),
+    retries: readNumberEnv("AI_HTTP_RETRIES", 2),
+    backoffMs: readNumberEnv("AI_HTTP_RETRY_BACKOFF_MS", 400),
+  } as const;
+
+  const sendRequest = async (useTools: boolean): Promise<Response> =>
+    fetchWithRetry(
+      "https://api.anthropic.com/v1/messages",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(
+          buildAnthropicRequestBody({
+            model: params.model,
+            systemPrompt: params.systemPrompt,
+            prompt: params.prompt,
+            responseSchema: useTools ? params.responseSchema : undefined,
+          }),
+        ),
       },
-      body: JSON.stringify({
-        model: params.model,
-        max_tokens: Math.max(1, readNumberEnv("ANTHROPIC_MAX_TOKENS", 4_096)),
-        temperature: 0.2,
-        system: ASK_SYSTEM_PROMPT,
-        messages: [{ role: "user", content: params.prompt }],
-      }),
-    },
-    {
-      timeoutMs: readNumberEnv("AI_HTTP_TIMEOUT_MS", 30_000),
-      retries: readNumberEnv("AI_HTTP_RETRIES", 2),
-      backoffMs: readNumberEnv("AI_HTTP_RETRY_BACKOFF_MS", 400),
-    },
-  );
+      requestOptions,
+    );
+
+  let response = await sendRequest(Boolean(params.responseSchema));
+  if (!response.ok) {
+    const body = await response.text();
+    if (
+      params.responseSchema &&
+      shouldRetryAnthropicWithoutTools(response.status, body)
+    ) {
+      response = await sendRequest(false);
+    } else {
+      throw new Error(
+        `Anthropic API error (${response.status}): ${body.slice(0, 300)}`,
+      );
+    }
+  }
 
   if (!response.ok) {
     const body = await response.text();
@@ -766,26 +858,43 @@ async function askWithAnthropic(params: {
     );
   }
 
-  const payload = (await response.json()) as {
-    content?: Array<{ type?: string; text?: string }>;
-  };
-  const text =
-    payload.content
-      ?.filter((item) => item.type === "text" && typeof item.text === "string")
-      .map((item) => item.text as string)
-      .join("\n")
-      .trim() ?? "";
-
-  if (!text) {
-    throw new Error("Anthropic response has no text content");
-  }
-
-  return parseJsonFromModelText(text);
+  const payload = (await response.json()) as AnthropicResponsePayload;
+  return parseAnthropicJsonPayload(payload);
 }
 
-async function askWithGemini(params: {
+function buildAnthropicRequestBody(params: {
+  model: string;
+  systemPrompt: string;
+  prompt: string;
+  responseSchema?: Record<string, unknown>;
+}): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model: params.model,
+    max_tokens: Math.max(1, readNumberEnv("ANTHROPIC_MAX_TOKENS", 8_192)),
+    temperature: 0.2,
+    system: params.systemPrompt,
+    messages: [{ role: "user", content: params.prompt }],
+  };
+  if (!params.responseSchema) {
+    return body;
+  }
+
+  body.tools = [
+    {
+      name: "emit_json",
+      description: "Emit a structured JSON payload matching the required schema.",
+      input_schema: params.responseSchema,
+    },
+  ];
+  body.tool_choice = { type: "tool", name: "emit_json" };
+  return body;
+}
+
+async function callGeminiJson(params: {
   model: string;
   prompt: string;
+  systemPrompt: string;
+  responseSchema?: Record<string, unknown>;
 }): Promise<unknown> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -796,36 +905,53 @@ async function askWithGemini(params: {
     params.model,
   )}:generateContent`;
 
-  const response = await fetchWithRetry(
-    endpoint,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-goog-api-key": apiKey,
-      },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [{ text: ASK_SYSTEM_PROMPT }],
+  const requestOptions = {
+    timeoutMs: readNumberEnv("AI_HTTP_TIMEOUT_MS", 30_000),
+    retries: readNumberEnv("AI_HTTP_RETRIES", 2),
+    backoffMs: readNumberEnv("AI_HTTP_RETRY_BACKOFF_MS", 400),
+  } as const;
+
+  const sendRequest = async (includeSchema: boolean): Promise<Response> =>
+    fetchWithRetry(
+      endpoint,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-goog-api-key": apiKey,
         },
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: params.prompt }],
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: params.systemPrompt }],
           },
-        ],
-        generationConfig: {
-          temperature: 0.2,
-          responseMimeType: "application/json",
-        },
-      }),
-    },
-    {
-      timeoutMs: readNumberEnv("AI_HTTP_TIMEOUT_MS", 30_000),
-      retries: readNumberEnv("AI_HTTP_RETRIES", 2),
-      backoffMs: readNumberEnv("AI_HTTP_RETRY_BACKOFF_MS", 400),
-    },
-  );
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: params.prompt }],
+            },
+          ],
+          generationConfig: buildGeminiGenerationConfig(
+            includeSchema ? params.responseSchema : undefined,
+          ),
+        }),
+      },
+      requestOptions,
+    );
+
+  let response = await sendRequest(Boolean(params.responseSchema));
+  if (!response.ok) {
+    const body = await response.text();
+    if (
+      params.responseSchema &&
+      shouldRetryGeminiWithoutSchema(response.status, body)
+    ) {
+      response = await sendRequest(false);
+    } else {
+      throw new Error(
+        `Gemini API error (${response.status}): ${body.slice(0, 300)}`,
+      );
+    }
+  }
 
   if (!response.ok) {
     const body = await response.text();
@@ -850,6 +976,111 @@ async function askWithGemini(params: {
 
   if (!text) {
     throw new Error("Gemini response has no text content");
+  }
+
+  return parseJsonFromModelText(text);
+}
+
+export function buildGeminiGenerationConfig(
+  responseSchema?: Record<string, unknown>,
+): {
+  temperature: number;
+  responseMimeType: string;
+  responseSchema?: Record<string, unknown>;
+} {
+  if (responseSchema) {
+    return {
+      temperature: 0.2,
+      responseMimeType: "application/json",
+      responseSchema,
+    };
+  }
+
+  return {
+    temperature: 0.2,
+    responseMimeType: "application/json",
+  };
+}
+
+export function shouldRetryGeminiWithoutSchema(
+  status: number,
+  errorText: string,
+): boolean {
+  if (status !== 400) {
+    return false;
+  }
+
+  const normalized = errorText.toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  const mentionsSchema =
+    normalized.includes("responseschema") ||
+    normalized.includes("response_schema");
+  if (!mentionsSchema) {
+    return false;
+  }
+
+  return (
+    normalized.includes("unknown name") ||
+    normalized.includes("unsupported") ||
+    normalized.includes("not support") ||
+    normalized.includes("not implemented")
+  );
+}
+
+export function shouldRetryAnthropicWithoutTools(
+  status: number,
+  errorText: string,
+): boolean {
+  if (status !== 400) {
+    return false;
+  }
+
+  const normalized = errorText.toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  const mentionsTooling =
+    normalized.includes("tool_choice") ||
+    normalized.includes("tool use") ||
+    normalized.includes("tool_use") ||
+    normalized.includes("tools") ||
+    normalized.includes("input_schema");
+  if (!mentionsTooling) {
+    return false;
+  }
+
+  return (
+    normalized.includes("unknown") ||
+    normalized.includes("unsupported") ||
+    normalized.includes("not support") ||
+    normalized.includes("not implemented") ||
+    normalized.includes("invalid_request_error")
+  );
+}
+
+type AnthropicResponsePayload = {
+  content?: Array<{ type?: string; text?: string; input?: unknown }>;
+};
+
+export function parseAnthropicJsonPayload(payload: AnthropicResponsePayload): unknown {
+  const toolInput = payload.content?.find((item) => item.type === "tool_use")?.input;
+  if (toolInput !== undefined) {
+    return toolInput;
+  }
+
+  const text =
+    payload.content
+      ?.filter((item) => item.type === "text" && typeof item.text === "string")
+      .map((item) => item.text as string)
+      .join("\n")
+      .trim() ?? "";
+
+  if (!text) {
+    throw new Error("Anthropic response has no text or tool_use content");
   }
 
   return parseJsonFromModelText(text);

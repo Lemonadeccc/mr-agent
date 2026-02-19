@@ -2,8 +2,12 @@ import {
   clearDuplicateRecord,
   ensureError,
   isDuplicateRequest,
+  loadAskConversationTurns,
+  localizeText,
   pruneExpiredCache,
   readNumberEnv,
+  rememberAskConversationTurn,
+  resolveUiLocale,
   trimCache,
   type ExpiringCacheEntry,
 } from "#core";
@@ -30,8 +34,8 @@ import type {
 } from "#review";
 
 const MAX_FILES = 40;
-const MAX_PATCH_CHARS_PER_FILE = 4_000;
-const MAX_TOTAL_PATCH_CHARS = 60_000;
+const DEFAULT_MAX_PATCH_CHARS_PER_FILE = 4_000;
+const DEFAULT_MAX_TOTAL_PATCH_CHARS = 60_000;
 const DEFAULT_DEDUPE_TTL_MS = 5 * 60 * 1_000;
 const DEFAULT_MERGED_REPORT_DEDUPE_TTL_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_GUIDELINE_CACHE_TTL_MS = 5 * 60 * 1_000;
@@ -43,6 +47,12 @@ const MAX_INCREMENTAL_STATE_ENTRIES = 2_000;
 const DEFAULT_FEEDBACK_SIGNAL_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_FEEDBACK_SIGNALS = 80;
 const MAX_FEEDBACK_CACHE_ENTRIES = 1_000;
+const MANAGED_COMMENT_SCAN_PER_PAGE = 100;
+const MAX_MANAGED_COMMENT_SCAN_PAGES = 20;
+const GITHUB_PULL_FILES_TRUNCATED_WARNING = {
+  zh: "⚠️ 文件列表拉取达到上限（最多 20 页 * 100 = 2000 个文件），当前评审结果可能未覆盖全部变更。",
+  en: "⚠️ File listing reached the hard limit (20 pages * 100 = 2000 files); this review may not cover all changed files.",
+} as const;
 
 type ProcessGuideline = { path: string; content: string };
 type SecretFinding = {
@@ -69,12 +79,18 @@ export interface GitHubPullSummary {
   title: string;
   body: string | null;
   user: { login: string } | null;
+  draft?: boolean;
   base: { ref: string; sha: string };
   head: { ref: string; sha: string };
   additions: number;
   deletions: number;
   changed_files: number;
   html_url: string;
+}
+
+export interface GitHubIssueCommentSummary {
+  id: number;
+  body?: string | null;
 }
 
 export interface GitHubPullFile {
@@ -197,6 +213,13 @@ export interface MinimalGitHubOctokit {
     }): Promise<unknown>;
   };
   issues: {
+    listComments?(params: {
+      owner: string;
+      repo: string;
+      issue_number: number;
+      per_page?: number;
+      page?: number;
+    }): Promise<{ data: GitHubIssueCommentSummary[] }>;
     createComment(params: {
       owner: string;
       repo: string;
@@ -238,6 +261,7 @@ export interface MinimalGitHubOctokit {
       per_page: number;
     },
   ): Promise<GitHubPullFile[]>;
+  __getLastListFilesTruncated?(): boolean;
 }
 
 export interface GitHubReviewContext {
@@ -273,11 +297,13 @@ interface GitHubAskRunParams {
   pullNumber: number;
   question: string;
   trigger: ReviewTrigger;
+  managedCommentKey?: string;
   dedupeSuffix?: string;
   customRules?: string[];
   includeCiChecks?: boolean;
   commentTitle?: string;
   displayQuestion?: string;
+  enableConversationContext?: boolean;
   throwOnError?: boolean;
 }
 
@@ -296,6 +322,7 @@ interface GitHubChangelogRunParams {
 interface GitHubCollectedContext {
   input: PullRequestReviewInput;
   files: DiffFileContext[];
+  filesTruncated: boolean;
   owner: string;
   repo: string;
   baseSha: string;
@@ -303,6 +330,223 @@ interface GitHubCollectedContext {
   baseBranch: string;
   headBranch: string;
   author: string;
+}
+
+export function resolveGitHubPatchCharLimits(): {
+  maxPatchCharsPerFile: number;
+  maxTotalPatchChars: number;
+} {
+  const maxPatchCharsPerFile = Math.max(
+    1,
+    readNumberEnv(
+      "GITHUB_MAX_PATCH_CHARS_PER_FILE",
+      DEFAULT_MAX_PATCH_CHARS_PER_FILE,
+    ),
+  );
+  const maxTotalPatchChars = Math.max(
+    maxPatchCharsPerFile,
+    readNumberEnv(
+      "GITHUB_MAX_TOTAL_PATCH_CHARS",
+      DEFAULT_MAX_TOTAL_PATCH_CHARS,
+    ),
+  );
+
+  return {
+    maxPatchCharsPerFile,
+    maxTotalPatchChars,
+  };
+}
+
+type ManagedGitHubCommentKey = string;
+
+function normalizeManagedGitHubCommentKey(raw: string): string {
+  const normalized = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9:_-]/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 120);
+  return normalized || "default";
+}
+
+function hashManagedKeySeed(raw: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < raw.length; i += 1) {
+    hash ^= raw.charCodeAt(i);
+    hash +=
+      (hash << 1) +
+      (hash << 4) +
+      (hash << 7) +
+      (hash << 8) +
+      (hash << 24);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+export function buildManagedCommandCommentKey(
+  command: string,
+  seed: string,
+): string {
+  const commandKey = normalizeManagedGitHubCommentKey(`cmd-${command}`).replace(
+    /:/g,
+    "-",
+  );
+  const normalizedSeed = seed.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 240);
+  return `${commandKey}:${hashManagedKeySeed(normalizedSeed)}`;
+}
+
+function managedGitHubCommentMarker(key: ManagedGitHubCommentKey): string {
+  return `<!-- mr-agent:${normalizeManagedGitHubCommentKey(key)} -->`;
+}
+
+function managedGitHubCommentBody(
+  body: string,
+  key: ManagedGitHubCommentKey,
+): string {
+  return `${body.trim()}\n\n${managedGitHubCommentMarker(key)}`;
+}
+
+function isGitHubAutoReviewTrigger(trigger: ReviewTrigger): boolean {
+  return (
+    trigger === "pr-opened" ||
+    trigger === "pr-edited" ||
+    trigger === "pr-synchronize"
+  );
+}
+
+function shouldUseManagedReviewSummary(trigger: ReviewTrigger): boolean {
+  return isGitHubAutoReviewTrigger(trigger) || trigger === "merged";
+}
+
+export function shouldSkipGitHubReviewForDraft(
+  trigger: ReviewTrigger,
+  isDraft: boolean,
+): boolean {
+  return isDraft && isGitHubAutoReviewTrigger(trigger);
+}
+
+export async function upsertGitHubManagedIssueComment(params: {
+  context: GitHubReviewContext;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  body: string;
+  markerKey: ManagedGitHubCommentKey;
+}): Promise<void> {
+  const marker = managedGitHubCommentMarker(params.markerKey);
+  const nextBody = managedGitHubCommentBody(params.body, params.markerKey);
+  const listComments = params.context.octokit.issues.listComments;
+  if (listComments) {
+    try {
+      for (let page = 1; page <= MAX_MANAGED_COMMENT_SCAN_PAGES; page += 1) {
+        const listed = await listComments({
+          owner: params.owner,
+          repo: params.repo,
+          issue_number: params.issueNumber,
+          per_page: MANAGED_COMMENT_SCAN_PER_PAGE,
+          page,
+        });
+        const existing = listed.data.find((item) => item.body?.includes(marker));
+        if (existing) {
+          await params.context.octokit.issues.updateComment({
+            owner: params.owner,
+            repo: params.repo,
+            comment_id: existing.id,
+            body: nextBody,
+          });
+          return;
+        }
+        if (listed.data.length < MANAGED_COMMENT_SCAN_PER_PAGE) {
+          break;
+        }
+      }
+    } catch (error) {
+      params.context.log.error(
+        {
+          owner: params.owner,
+          repo: params.repo,
+          issueNumber: params.issueNumber,
+          markerKey: params.markerKey,
+          error: getErrorMessage(error),
+        },
+        "Failed to list/update managed GitHub issue comment; falling back to create",
+      );
+    }
+  }
+
+  await params.context.octokit.issues.createComment({
+    owner: params.owner,
+    repo: params.repo,
+    issue_number: params.issueNumber,
+    body: nextBody,
+  });
+}
+
+export async function postGitHubCommandComment(params: {
+  context: GitHubReviewContext;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  body: string;
+  managedCommentKey?: string;
+}): Promise<void> {
+  if (params.managedCommentKey) {
+    await upsertGitHubManagedIssueComment({
+      context: params.context,
+      owner: params.owner,
+      repo: params.repo,
+      issueNumber: params.issueNumber,
+      body: params.body,
+      markerKey: params.managedCommentKey,
+    });
+    return;
+  }
+
+  await params.context.octokit.issues.createComment({
+    owner: params.owner,
+    repo: params.repo,
+    issue_number: params.issueNumber,
+    body: params.body,
+  });
+}
+
+export async function publishGitHubNoDiffStatus(params: {
+  context: GitHubReviewContext;
+  owner: string;
+  repo: string;
+  pullNumber: number;
+  progressCommentId?: number;
+  markerKey: ManagedGitHubCommentKey;
+  body?: string;
+}): Promise<void> {
+  const locale = resolveUiLocale();
+  const body =
+    params.body?.trim() ||
+    localizeText(
+      {
+        zh: "`AI Review` 未发现可评审的文本改动，已跳过。",
+        en: "`AI Review` found no textual changes to review, skipped.",
+      },
+      locale,
+    );
+  if (params.progressCommentId) {
+    await params.context.octokit.issues.updateComment({
+      owner: params.owner,
+      repo: params.repo,
+      comment_id: params.progressCommentId,
+      body: managedGitHubCommentBody(body, params.markerKey),
+    });
+    return;
+  }
+
+  await upsertGitHubManagedIssueComment({
+    context: params.context,
+    owner: params.owner,
+    repo: params.repo,
+    issueNumber: params.pullNumber,
+    body,
+    markerKey: params.markerKey,
+  });
 }
 
 export async function runGitHubReview(
@@ -321,6 +565,7 @@ export async function runGitHubReview(
     throwOnError = false,
   } = params;
   const { owner, repo } = context.repo();
+  const locale = resolveUiLocale();
   const requestKey = [
     `github:${owner}/${repo}#${pullNumber}:${mode}:${trigger}`,
     dedupeSuffix,
@@ -335,7 +580,13 @@ export async function runGitHubReview(
         owner,
         repo,
         issue_number: pullNumber,
-        body: "`AI Review` 最近 5 分钟内已经执行过，本次请求已跳过。",
+        body: localizeText(
+          {
+            zh: "`AI Review` 最近 5 分钟内已经执行过，本次请求已跳过。",
+            en: "`AI Review` already ran in the last 5 minutes, skipped this request.",
+          },
+          locale,
+        ),
       });
     }
     return;
@@ -350,7 +601,35 @@ export async function runGitHubReview(
   const incrementalBaseSha = shouldUseIncrementalReview(trigger)
     ? getIncrementalHead(reviewPrKey)
     : undefined;
-  const feedbackSignals = loadGitHubFeedbackSignals(owner, repo);
+  const feedbackSignals = loadGitHubFeedbackSignals(owner, repo, pullNumber);
+  let preloadedPullSummary: GitHubPullSummary | undefined;
+
+  if (isGitHubAutoReviewTrigger(trigger)) {
+    const prMeta = await context.octokit.pulls.get({
+      owner,
+      repo,
+      pull_number: pullNumber,
+    });
+    preloadedPullSummary = prMeta.data;
+    if (shouldSkipGitHubReviewForDraft(trigger, Boolean(prMeta.data.draft))) {
+      context.log.info(
+        { owner, repo, pullNumber, trigger },
+        "Skipping GitHub AI review for draft pull request",
+      );
+      return;
+    }
+    if (
+      trigger === "pr-edited" &&
+      incrementalBaseSha &&
+      incrementalBaseSha === prMeta.data.head.sha
+    ) {
+      context.log.info(
+        { owner, repo, pullNumber, trigger, headSha: prMeta.data.head.sha },
+        "Skipping GitHub AI review for pull_request.edited without code changes",
+      );
+      return;
+    }
+  }
 
   let progressCommentId: number | undefined;
   if (trigger === "comment-command") {
@@ -358,7 +637,13 @@ export async function runGitHubReview(
       owner,
       repo,
       issue_number: pullNumber,
-      body: "`AI Review` 正在分析这个 PR，请稍候...",
+      body: localizeText(
+        {
+          zh: "`AI Review` 正在分析这个 PR，请稍候...",
+          en: "`AI Review` is analyzing this PR, please wait...",
+        },
+        locale,
+      ),
     });
     progressCommentId = progress.data.id;
   }
@@ -373,23 +658,31 @@ export async function runGitHubReview(
       customRules,
       includeCiChecks,
       feedbackSignals,
+      pullSummary: preloadedPullSummary,
     });
 
     if (collected.files.length === 0) {
-      await context.octokit.issues.createComment({
+      const noDiffBody = collected.filesTruncated
+        ? appendGitHubFilesTruncatedWarning(
+            localizeText(
+              {
+                zh: "`AI Review` 未发现可评审的文本改动。",
+                en: "`AI Review` found no textual changes to review.",
+              },
+              locale,
+            ),
+            locale,
+          )
+        : undefined;
+      await publishGitHubNoDiffStatus({
+        context,
         owner,
         repo,
-        issue_number: pullNumber,
-        body: "`AI Review` 未发现可评审的文本改动，已跳过。",
+        pullNumber,
+        progressCommentId,
+        markerKey: "review-no-diff",
+        body: noDiffBody,
       });
-      if (progressCommentId) {
-        await context.octokit.issues.updateComment({
-          owner,
-          repo,
-          comment_id: progressCommentId,
-          body: "`AI Review` 未发现可评审改动，已跳过。",
-        });
-      }
       rememberIncrementalHead(reviewPrKey, collected.headSha);
       return;
     }
@@ -401,19 +694,55 @@ export async function runGitHubReview(
         context,
         collected,
         reviewResult,
+        locale,
       );
-      await context.octokit.issues.createComment({
-        owner,
-        repo,
-        issue_number: pullNumber,
-        body: [
-          "## AI 评审结果（Comment 模式）",
-          "",
-          `已发布行级评论: **${posted.posted}**，跳过: **${posted.skipped}**`,
-          "",
-          "如需汇总报告，请评论：`/ai-review report`",
-        ].join("\n"),
-      });
+      const summaryBody = [
+        localizeText(
+          {
+            zh: "## AI 评审结果（Comment 模式）",
+            en: "## AI Review Result (Comment Mode)",
+          },
+          locale,
+        ),
+        "",
+        localizeText(
+          {
+            zh: `已发布行级评论: **${posted.posted}**，跳过: **${posted.skipped}**`,
+            en: `Line comments posted: **${posted.posted}**, skipped: **${posted.skipped}**`,
+          },
+          locale,
+        ),
+        "",
+        localizeText(
+          {
+            zh: "如需汇总报告，请评论：`/ai-review report`",
+            en: "For a consolidated report, comment: `/ai-review report`",
+          },
+          locale,
+        ),
+      ].join("\n");
+      const summaryBodyWithWarning = maybeAppendGitHubFilesTruncatedWarning(
+        summaryBody,
+        collected.filesTruncated,
+        locale,
+      );
+      if (shouldUseManagedReviewSummary(trigger)) {
+        await upsertGitHubManagedIssueComment({
+          context,
+          owner,
+          repo,
+          issueNumber: pullNumber,
+          body: summaryBodyWithWarning,
+          markerKey: "review-comment-summary",
+        });
+      } else {
+        await context.octokit.issues.createComment({
+          owner,
+          repo,
+          issue_number: pullNumber,
+          body: summaryBodyWithWarning,
+        });
+      }
     } else {
       const body = buildReportCommentMarkdown(reviewResult, collected.files, {
         platform: "github",
@@ -421,13 +750,31 @@ export async function runGitHubReview(
         repo: collected.repo,
         baseSha: collected.baseSha,
         headSha: collected.headSha,
+      }, {
+        locale,
       });
-      await context.octokit.issues.createComment({
-        owner,
-        repo,
-        issue_number: pullNumber,
+      const bodyWithWarning = maybeAppendGitHubFilesTruncatedWarning(
         body,
-      });
+        collected.filesTruncated,
+        locale,
+      );
+      if (shouldUseManagedReviewSummary(trigger)) {
+        await upsertGitHubManagedIssueComment({
+          context,
+          owner,
+          repo,
+          issueNumber: pullNumber,
+          body: bodyWithWarning,
+          markerKey: "review-report",
+        });
+      } else {
+        await context.octokit.issues.createComment({
+          owner,
+          repo,
+          issue_number: pullNumber,
+          body: bodyWithWarning,
+        });
+      }
     }
 
     if (enableSecretScan) {
@@ -481,7 +828,13 @@ export async function runGitHubReview(
         owner,
         repo,
         comment_id: progressCommentId,
-        body: "`AI Review` 分析完成，结果已发布。",
+        body: localizeText(
+          {
+            zh: "`AI Review` 分析完成，结果已发布。",
+            en: "`AI Review` analysis completed. Results have been published.",
+          },
+          locale,
+        ),
       });
     }
 
@@ -492,7 +845,13 @@ export async function runGitHubReview(
         repository: `${owner}/${repo}`,
         sourceBranch: collected.headBranch,
         targetBranch: collected.baseBranch,
-        content: `代码评审完毕 https://github.com/${owner}/${repo}/pull/${pullNumber}`,
+        content: localizeText(
+          {
+            zh: `代码评审完毕 https://github.com/${owner}/${repo}/pull/${pullNumber}`,
+            en: `Code review completed https://github.com/${owner}/${repo}/pull/${pullNumber}`,
+          },
+          locale,
+        ),
       });
     } catch (notifyError) {
       context.log.error(
@@ -523,11 +882,29 @@ export async function runGitHubReview(
         repo,
         issue_number: pullNumber,
         body: [
-          "## AI Review 执行失败",
+          localizeText(
+            {
+              zh: "## AI Review 执行失败",
+              en: "## AI Review Failed",
+            },
+            locale,
+          ),
           "",
-          `错误：\`${publicReason}\``,
+          localizeText(
+            {
+              zh: `错误：\`${publicReason}\``,
+              en: `Error: \`${publicReason}\``,
+            },
+            locale,
+          ),
           "",
-          "请检查 AI_PROVIDER/模型 API Key/GitHub App 权限配置。",
+          localizeText(
+            {
+              zh: "请检查 AI_PROVIDER/模型 API Key/GitHub App 权限配置。",
+              en: "Please check AI_PROVIDER/model API key/GitHub App permission settings.",
+            },
+            locale,
+          ),
         ].join("\n"),
       });
     } catch (commentError) {
@@ -550,7 +927,13 @@ export async function runGitHubReview(
           owner,
           repo,
           comment_id: progressCommentId,
-          body: "`AI Review` 执行失败，请查看下方错误说明。",
+          body: localizeText(
+            {
+              zh: "`AI Review` 执行失败，请查看下方错误说明。",
+              en: "`AI Review` failed. See the error details below.",
+            },
+            locale,
+          ),
         });
       } catch (updateError) {
         context.log.error(
@@ -575,7 +958,13 @@ export async function runGitHubReview(
         repository: `${owner}/${repo}`,
         sourceBranch: "-",
         targetBranch: "-",
-        content: `代码评审失败: ${reason}`,
+        content: localizeText(
+          {
+            zh: `代码评审失败: ${reason}`,
+            en: `Code review failed: ${reason}`,
+          },
+          locale,
+        ),
       });
     } catch (notifyError) {
       context.log.error(
@@ -597,12 +986,46 @@ export async function runGitHubReview(
   }
 }
 
+export function maybeAppendGitHubFilesTruncatedWarning(
+  body: string,
+  filesTruncated: boolean,
+  locale: "zh" | "en" = resolveUiLocale(),
+): string {
+  if (!filesTruncated) {
+    return body;
+  }
+
+  return appendGitHubFilesTruncatedWarning(body, locale);
+}
+
+export function appendGitHubFilesTruncatedWarning(
+  body: string,
+  locale: "zh" | "en" = resolveUiLocale(),
+): string {
+  return [
+    body.trim(),
+    "",
+    localizeText(
+      {
+        zh: GITHUB_PULL_FILES_TRUNCATED_WARNING.zh,
+        en: GITHUB_PULL_FILES_TRUNCATED_WARNING.en,
+      },
+      locale,
+    ),
+  ].join("\n");
+}
+
 export function recordGitHubFeedbackSignal(params: {
   owner: string;
   repo: string;
+  pullNumber?: number;
   signal: string;
 }): void {
-  const feedbackKey = `${params.owner}/${params.repo}`;
+  const feedbackKey = buildGitHubFeedbackSignalKey(
+    params.owner,
+    params.repo,
+    params.pullNumber,
+  );
   const normalizedSignal = params.signal.trim().replace(/\s+/g, " ").slice(0, 240);
   if (!normalizedSignal) {
     return;
@@ -641,11 +1064,58 @@ function resolveDedupeTtlMs(
   return DEFAULT_DEDUPE_TTL_MS;
 }
 
-function loadGitHubFeedbackSignals(owner: string, repo: string): string[] {
-  const feedbackKey = `${owner}/${repo}`;
+function loadGitHubFeedbackSignals(
+  owner: string,
+  repo: string,
+  pullNumber?: number,
+): string[] {
+  const feedbackKey = buildGitHubFeedbackSignalKey(owner, repo, pullNumber);
+  const repositoryLevelKey = buildGitHubFeedbackSignalKey(owner, repo);
   const now = Date.now();
   pruneExpiredCache(feedbackSignalCache, now);
-  return feedbackSignalCache.get(feedbackKey)?.value ?? [];
+  const scoped = feedbackSignalCache.get(feedbackKey)?.value ?? [];
+  const repositoryLevel = feedbackSignalCache.get(repositoryLevelKey)?.value ?? [];
+  if (
+    !Number.isInteger(pullNumber) ||
+    (pullNumber as number) <= 0 ||
+    feedbackKey === repositoryLevelKey
+  ) {
+    return repositoryLevel;
+  }
+  if (scoped.length === 0) {
+    return repositoryLevel;
+  }
+
+  const merged = [
+    ...scoped,
+    ...repositoryLevel.filter((signal) => !scoped.includes(signal)),
+  ];
+  return merged.slice(0, MAX_FEEDBACK_SIGNALS);
+}
+
+function buildGitHubFeedbackSignalKey(
+  owner: string,
+  repo: string,
+  pullNumber?: number,
+): string {
+  const base = `${owner}/${repo}`;
+  if (!Number.isInteger(pullNumber) || (pullNumber as number) <= 0) {
+    return base;
+  }
+
+  return `${base}#${pullNumber}`;
+}
+
+export function __readGitHubFeedbackSignalsForTests(
+  owner: string,
+  repo: string,
+  pullNumber?: number,
+): string[] {
+  return loadGitHubFeedbackSignals(owner, repo, pullNumber);
+}
+
+export function __clearGitHubFeedbackSignalCacheForTests(): void {
+  feedbackSignalCache.clear();
 }
 
 async function collectGitHubPullRequestContext(params: {
@@ -657,6 +1127,7 @@ async function collectGitHubPullRequestContext(params: {
   customRules?: string[];
   includeCiChecks?: boolean;
   feedbackSignals?: string[];
+  pullSummary?: GitHubPullSummary;
 }): Promise<GitHubCollectedContext> {
   const {
     octokit,
@@ -667,18 +1138,22 @@ async function collectGitHubPullRequestContext(params: {
     customRules,
     includeCiChecks = true,
     feedbackSignals,
+    pullSummary,
   } = params;
 
-  const prResponse = await octokit.pulls.get({
-    owner,
-    repo,
-    pull_number: pullNumber,
-  });
-
-  const pr = prResponse.data;
+  const pr =
+    pullSummary ??
+    (
+      await octokit.pulls.get({
+        owner,
+        repo,
+        pull_number: pullNumber,
+      })
+    ).data;
   let files: GitHubPullFile[];
+  let filesTruncated = false;
   if (incrementalBaseSha && incrementalBaseSha !== pr.head.sha) {
-    files = await loadIncrementalPullFiles({
+    const incrementalResult = await loadIncrementalPullFiles({
       octokit,
       owner,
       repo,
@@ -686,6 +1161,8 @@ async function collectGitHubPullRequestContext(params: {
       incrementalBaseSha,
       headSha: pr.head.sha,
     });
+    files = incrementalResult.files;
+    filesTruncated = incrementalResult.truncated;
   } else {
     files = await octokit.paginate(octokit.pulls.listFiles, {
       owner,
@@ -693,13 +1170,18 @@ async function collectGitHubPullRequestContext(params: {
       pull_number: pullNumber,
       per_page: 100,
     });
+    filesTruncated = octokit.__getLastListFilesTruncated?.() ?? false;
   }
 
   const changedFiles: DiffFileContext[] = [];
+  const limits = resolveGitHubPatchCharLimits();
   let totalPatchChars = 0;
 
   for (const file of files) {
-    if (changedFiles.length >= MAX_FILES || totalPatchChars >= MAX_TOTAL_PATCH_CHARS) {
+    if (
+      changedFiles.length >= MAX_FILES ||
+      totalPatchChars >= limits.maxTotalPatchChars
+    ) {
       break;
     }
 
@@ -709,11 +1191,11 @@ async function collectGitHubPullRequestContext(params: {
 
     const rawPatch = file.patch ?? "(binary / patch omitted)";
     const trimmedPatch =
-      rawPatch.length > MAX_PATCH_CHARS_PER_FILE
-        ? `${rawPatch.slice(0, MAX_PATCH_CHARS_PER_FILE)}\n... [patch truncated]`
+      rawPatch.length > limits.maxPatchCharsPerFile
+        ? `${rawPatch.slice(0, limits.maxPatchCharsPerFile)}\n... [patch truncated]`
         : rawPatch;
 
-    if (totalPatchChars + trimmedPatch.length > MAX_TOTAL_PATCH_CHARS) {
+    if (totalPatchChars + trimmedPatch.length > limits.maxTotalPatchChars) {
       break;
     }
 
@@ -790,6 +1272,7 @@ async function collectGitHubPullRequestContext(params: {
   return {
     input,
     files: changedFiles,
+    filesTruncated,
     owner,
     repo,
     baseSha: pr.base.sha,
@@ -804,6 +1287,7 @@ async function publishGitHubLineComments(
   context: GitHubReviewContext,
   collected: GitHubCollectedContext,
   reviewResult: PullRequestReviewResult,
+  locale: "zh" | "en",
 ): Promise<{ posted: number; skipped: number }> {
   const { owner, repo } = collected;
   let posted = 0;
@@ -827,7 +1311,7 @@ async function publishGitHubLineComments(
         owner,
         repo,
         pull_number: collected.input.number,
-        body: buildIssueCommentMarkdown(review, { platform: "github" }),
+        body: buildIssueCommentMarkdown(review, { platform: "github", locale }),
         commit_id: collected.headSha,
         path: file.newPath,
         line,
@@ -854,6 +1338,8 @@ export async function runGitHubDescribe(
     throwOnError = false,
   } = params;
   const { owner, repo } = context.repo();
+  const locale = resolveUiLocale();
+  const managedCommentKey = "cmd-describe";
   const requestKey = [
     `github:${owner}/${repo}#${pullNumber}:describe:${trigger}:${apply ? "apply" : "draft"}`,
     dedupeSuffix,
@@ -863,11 +1349,19 @@ export async function runGitHubDescribe(
 
   if (isDuplicateRequest(requestKey, DEFAULT_DEDUPE_TTL_MS)) {
     if (trigger === "comment-command" || trigger === "describe-command") {
-      await context.octokit.issues.createComment({
+      await postGitHubCommandComment({
+        context,
         owner,
         repo,
-        issue_number: pullNumber,
-        body: "`AI Describe` 最近 5 分钟内已经执行过，本次请求已跳过。",
+        issueNumber: pullNumber,
+        body: localizeText(
+          {
+            zh: "`AI Describe` 最近 5 分钟内已经执行过，本次请求已跳过。",
+            en: "`AI Describe` already ran in the last 5 minutes, skipped this request.",
+          },
+          locale,
+        ),
+        managedCommentKey,
       });
     }
     return;
@@ -880,8 +1374,10 @@ export async function runGitHubDescribe(
       repo,
       pullNumber,
     });
-    const reviewResult = await analyzePullRequest(collected.input);
-    const description = buildPullRequestDescriptionDraft(collected, reviewResult);
+    const description = await answerPullRequestQuestion(
+      collected.input,
+      buildGitHubDescribeQuestion(locale),
+    );
 
     if (apply) {
       await context.octokit.pulls.update({
@@ -890,32 +1386,60 @@ export async function runGitHubDescribe(
         pull_number: pullNumber,
         body: description,
       });
-      await context.octokit.issues.createComment({
+      await postGitHubCommandComment({
+        context,
         owner,
         repo,
-        issue_number: pullNumber,
+        issueNumber: pullNumber,
         body: [
-          "## AI PR 描述已更新",
+          localizeText(
+            {
+              zh: "## AI PR 描述已更新",
+              en: "## AI PR Description Updated",
+            },
+            locale,
+          ),
           "",
-          "已根据当前 diff 自动生成并写入 PR 描述。",
+          localizeText(
+            {
+              zh: "已根据当前 diff 自动生成并写入 PR 描述。",
+              en: "The PR description was generated from the current diff and applied.",
+            },
+            locale,
+          ),
         ].join("\n"),
+        managedCommentKey,
       });
       return;
     }
 
-    await context.octokit.issues.createComment({
+    await postGitHubCommandComment({
+      context,
       owner,
       repo,
-      issue_number: pullNumber,
+      issueNumber: pullNumber,
       body: [
-        "## AI 生成 PR 描述草稿",
+        localizeText(
+          {
+            zh: "## AI 生成 PR 描述草稿",
+            en: "## AI PR Description Draft",
+          },
+          locale,
+        ),
         "",
         "```markdown",
         description,
         "```",
         "",
-        "如需自动写入 PR 描述，请使用：`/describe --apply`",
+        localizeText(
+          {
+            zh: "如需自动写入 PR 描述，请使用：`/describe --apply`",
+            en: "To apply this draft to the PR description, use: `/describe --apply`",
+          },
+          locale,
+        ),
       ].join("\n"),
+      managedCommentKey,
     });
   } catch (error) {
     clearDuplicateRecord(requestKey);
@@ -926,15 +1450,29 @@ export async function runGitHubDescribe(
     );
 
     try {
-      await context.octokit.issues.createComment({
+      await postGitHubCommandComment({
+        context,
         owner,
         repo,
-        issue_number: pullNumber,
+        issueNumber: pullNumber,
         body: [
-          "## AI Describe 执行失败",
+          localizeText(
+            {
+              zh: "## AI Describe 执行失败",
+              en: "## AI Describe Failed",
+            },
+            locale,
+          ),
           "",
-          `错误：\`${getPublicErrorMessage(error)}\``,
+          localizeText(
+            {
+              zh: `错误：\`${getPublicErrorMessage(error)}\``,
+              en: `Error: \`${getPublicErrorMessage(error)}\``,
+            },
+            locale,
+          ),
         ].join("\n"),
+        managedCommentKey,
       });
     } catch (commentError) {
       context.log.error(
@@ -964,14 +1502,17 @@ export async function runGitHubAsk(
     pullNumber,
     question,
     trigger,
+    managedCommentKey,
     dedupeSuffix,
     customRules = [],
     includeCiChecks = true,
     commentTitle = "AI Ask",
     displayQuestion,
+    enableConversationContext = false,
     throwOnError = false,
   } = params;
   const { owner, repo } = context.repo();
+  const locale = resolveUiLocale();
   const normalizedQuestion = question.trim().replace(/\s+/g, " ").slice(0, 120);
   const requestKey = [
     `github:${owner}/${repo}#${pullNumber}:ask:${trigger}:${normalizedQuestion}`,
@@ -981,17 +1522,25 @@ export async function runGitHubAsk(
     .join(":");
 
   if (isDuplicateRequest(requestKey, DEFAULT_DEDUPE_TTL_MS)) {
-    await context.octokit.issues.createComment({
+    await postGitHubCommandComment({
+      context,
       owner,
       repo,
-      issue_number: pullNumber,
-      body: `\`${commentTitle}\` 最近 5 分钟内已回答过相同问题，本次请求已跳过。`,
+      issueNumber: pullNumber,
+      body: localizeText(
+        {
+          zh: `\`${commentTitle}\` 最近 5 分钟内已回答过相同问题，本次请求已跳过。`,
+          en: `\`${commentTitle}\` already answered the same question in the last 5 minutes, skipped this request.`,
+        },
+        locale,
+      ),
+      managedCommentKey,
     });
     return;
   }
 
   try {
-    const feedbackSignals = loadGitHubFeedbackSignals(owner, repo);
+    const feedbackSignals = loadGitHubFeedbackSignals(owner, repo, pullNumber);
     const collected = await collectGitHubPullRequestContext({
       octokit: context.octokit,
       owner,
@@ -1001,11 +1550,25 @@ export async function runGitHubAsk(
       includeCiChecks,
       feedbackSignals,
     });
-    const answer = await answerPullRequestQuestion(collected.input, question);
-    await context.octokit.issues.createComment({
+    const sessionKey = `github:${owner}/${repo}#${pullNumber}`;
+    const conversation = enableConversationContext
+      ? loadAskConversationTurns(sessionKey)
+      : [];
+    const answer = await answerPullRequestQuestion(collected.input, question, {
+      conversation,
+    });
+    if (enableConversationContext) {
+      rememberAskConversationTurn({
+        sessionKey,
+        question: (displayQuestion ?? question).trim(),
+        answer,
+      });
+    }
+    await postGitHubCommandComment({
+      context,
       owner,
       repo,
-      issue_number: pullNumber,
+      issueNumber: pullNumber,
       body: [
         `## ${commentTitle}`,
         "",
@@ -1013,6 +1576,7 @@ export async function runGitHubAsk(
         "",
         `**A:** ${answer}`,
       ].join("\n"),
+      managedCommentKey,
     });
   } catch (error) {
     clearDuplicateRecord(requestKey);
@@ -1028,15 +1592,29 @@ export async function runGitHubAsk(
     );
 
     try {
-      await context.octokit.issues.createComment({
+      await postGitHubCommandComment({
+        context,
         owner,
         repo,
-        issue_number: pullNumber,
+        issueNumber: pullNumber,
         body: [
-          `## ${commentTitle} 执行失败`,
+          localizeText(
+            {
+              zh: `## ${commentTitle} 执行失败`,
+              en: `## ${commentTitle} Failed`,
+            },
+            locale,
+          ),
           "",
-          `错误：\`${getPublicErrorMessage(error)}\``,
+          localizeText(
+            {
+              zh: `错误：\`${getPublicErrorMessage(error)}\``,
+              en: `Error: \`${getPublicErrorMessage(error)}\``,
+            },
+            locale,
+          ),
         ].join("\n"),
+        managedCommentKey,
       });
     } catch (commentError) {
       context.log.error(
@@ -1072,6 +1650,8 @@ export async function runGitHubChangelog(
     throwOnError = false,
   } = params;
   const { owner, repo } = context.repo();
+  const locale = resolveUiLocale();
+  const managedCommentKey = "cmd-changelog";
   const requestKey = [
     `github:${owner}/${repo}#${pullNumber}:changelog:${trigger}:${apply ? "apply" : "draft"}`,
     dedupeSuffix,
@@ -1080,17 +1660,25 @@ export async function runGitHubChangelog(
     .join(":");
 
   if (isDuplicateRequest(requestKey, DEFAULT_DEDUPE_TTL_MS)) {
-    await context.octokit.issues.createComment({
+    await postGitHubCommandComment({
+      context,
       owner,
       repo,
-      issue_number: pullNumber,
-      body: "`AI Changelog` 最近 5 分钟内已执行过同类请求，本次已跳过。",
+      issueNumber: pullNumber,
+      body: localizeText(
+        {
+          zh: "`AI Changelog` 最近 5 分钟内已执行过同类请求，本次已跳过。",
+          en: "`AI Changelog` already handled a similar request in the last 5 minutes, skipped this request.",
+        },
+        locale,
+      ),
+      managedCommentKey,
     });
     return;
   }
 
   try {
-    const feedbackSignals = loadGitHubFeedbackSignals(owner, repo);
+    const feedbackSignals = loadGitHubFeedbackSignals(owner, repo, pullNumber);
     const collected = await collectGitHubPullRequestContext({
       octokit: context.octokit,
       owner,
@@ -1100,21 +1688,29 @@ export async function runGitHubChangelog(
       includeCiChecks,
       feedbackSignals,
     });
-    const question = buildChangelogQuestion(focus);
+    const question = buildGitHubChangelogQuestion(focus, locale);
     const draft = (await answerPullRequestQuestion(collected.input, question)).trim();
 
     if (!apply) {
-      await context.octokit.issues.createComment({
+      await postGitHubCommandComment({
+        context,
         owner,
         repo,
-        issue_number: pullNumber,
+        issueNumber: pullNumber,
         body: [
           "## AI Changelog Draft",
           "",
           draft,
           "",
-          "如需自动写入仓库 CHANGELOG，请使用：`/changelog --apply`。",
+          localizeText(
+            {
+              zh: "如需自动写入仓库 CHANGELOG，请使用：`/changelog --apply`。",
+              en: "To apply this draft to repository CHANGELOG, use: `/changelog --apply`.",
+            },
+            locale,
+          ),
         ].join("\n"),
+        managedCommentKey,
       });
       return;
     }
@@ -1127,12 +1723,19 @@ export async function runGitHubChangelog(
       pullNumber,
       draft,
     });
-    await context.octokit.issues.createComment({
+    await postGitHubCommandComment({
+      context,
       owner,
       repo,
-      issue_number: pullNumber,
+      issueNumber: pullNumber,
       body: [
-        "## AI Changelog 已更新",
+        localizeText(
+          {
+            zh: "## AI Changelog 已更新",
+            en: "## AI Changelog Updated",
+          },
+          locale,
+        ),
         "",
         applyResult.message,
         "",
@@ -1140,6 +1743,7 @@ export async function runGitHubChangelog(
         draft,
         "```",
       ].join("\n"),
+      managedCommentKey,
     });
   } catch (error) {
     clearDuplicateRecord(requestKey);
@@ -1156,15 +1760,29 @@ export async function runGitHubChangelog(
     );
 
     try {
-      await context.octokit.issues.createComment({
+      await postGitHubCommandComment({
+        context,
         owner,
         repo,
-        issue_number: pullNumber,
+        issueNumber: pullNumber,
         body: [
-          "## AI Changelog 执行失败",
+          localizeText(
+            {
+              zh: "## AI Changelog 执行失败",
+              en: "## AI Changelog Failed",
+            },
+            locale,
+          ),
           "",
-          `错误：\`${getPublicErrorMessage(error)}\``,
+          localizeText(
+            {
+              zh: `错误：\`${getPublicErrorMessage(error)}\``,
+              en: `Error: \`${getPublicErrorMessage(error)}\``,
+            },
+            locale,
+          ),
         ].join("\n"),
+        managedCommentKey,
       });
     } catch (commentError) {
       context.log.error(
@@ -1193,14 +1811,18 @@ async function loadIncrementalPullFiles(params: {
   pullNumber: number;
   incrementalBaseSha: string;
   headSha: string;
-}): Promise<GitHubPullFile[]> {
+}): Promise<{ files: GitHubPullFile[]; truncated: boolean }> {
   if (!params.octokit.repos.compareCommits) {
-    return params.octokit.paginate(params.octokit.pulls.listFiles, {
+    const files = await params.octokit.paginate(params.octokit.pulls.listFiles, {
       owner: params.owner,
       repo: params.repo,
       pull_number: params.pullNumber,
       per_page: 100,
     });
+    return {
+      files,
+      truncated: params.octokit.__getLastListFilesTruncated?.() ?? false,
+    };
   }
 
   try {
@@ -1212,18 +1834,25 @@ async function loadIncrementalPullFiles(params: {
     });
     const files = compared.data.files ?? [];
     if (files.length > 0) {
-      return files;
+      return {
+        files,
+        truncated: false,
+      };
     }
   } catch {
     // Fallback to full file list when compare API is unavailable or SHAs are invalid.
   }
 
-  return params.octokit.paginate(params.octokit.pulls.listFiles, {
+  const files = await params.octokit.paginate(params.octokit.pulls.listFiles, {
     owner: params.owner,
     repo: params.repo,
     pull_number: params.pullNumber,
     per_page: 100,
   });
+  return {
+    files,
+    truncated: params.octokit.__getLastListFilesTruncated?.() ?? false,
+  };
 }
 
 async function loadHeadCheckRuns(params: {
@@ -1412,8 +2041,20 @@ function redactSecretSample(raw: string): string {
   return `${compact.slice(0, 4)}***${compact.slice(-4)}`;
 }
 
-function isLikelyPlaceholder(text: string): boolean {
+export function isLikelyPlaceholder(text: string): boolean {
   const normalized = text.toLowerCase();
+  const placeholderPatterns = [
+    /\bchange[_-]?me\b/,
+    /\byour[_-]?(api[_-]?key|token|secret|password)[_-]?here\b/,
+    /\bfill[_-]?in[_-]?your(?:[_-]?(api[_-]?key|token|secret|password))?\b/,
+    /<\s*your[-_a-z0-9]+\s*>/,
+    /\bxxx+\b/,
+    /\btodo\b/,
+  ];
+  if (placeholderPatterns.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+
   return (
     normalized.includes("example") ||
     normalized.includes("sample") ||
@@ -1440,12 +2081,19 @@ async function publishSecretWarningComment(params: {
   if (isDuplicateRequest(dedupeKey, DEFAULT_DEDUPE_TTL_MS)) {
     return;
   }
+  const locale = resolveUiLocale();
 
   const items = params.findings
     .slice(0, 10)
     .map(
       (item) =>
-        `- [ ] \`${item.path}:${item.line}\` 检测到疑似 **${item.kind}**（样本：\`${item.sample}\`）`,
+        localizeText(
+          {
+            zh: `- [ ] \`${item.path}:${item.line}\` 检测到疑似 **${item.kind}**（样本：\`${item.sample}\`）`,
+            en: `- [ ] \`${item.path}:${item.line}\` detected possible **${item.kind}** (sample: \`${item.sample}\`)`,
+          },
+          locale,
+        ),
     );
 
   await params.context.octokit.issues.createComment({
@@ -1453,12 +2101,30 @@ async function publishSecretWarningComment(params: {
     repo: params.repo,
     issue_number: params.pullNumber,
     body: [
-      "## 安全预警：疑似密钥泄露",
+      localizeText(
+        {
+          zh: "## 安全预警：疑似密钥泄露",
+          en: "## Security Alert: Potential Secret Leak",
+        },
+        locale,
+      ),
       "",
-      "请立即确认以下内容是否为真实凭据；若是，请立刻轮换并从历史中移除：",
+      localizeText(
+        {
+          zh: "请立即确认以下内容是否为真实凭据；若是，请立刻轮换并从历史中移除：",
+          en: "Please verify whether these are real credentials; if yes, rotate and remove them from history immediately:",
+        },
+        locale,
+      ),
       ...items,
       "",
-      "建议：启用 GitHub secret scanning 与 push protection 作为长期防线。",
+      localizeText(
+        {
+          zh: "建议：启用 GitHub secret scanning 与 push protection 作为长期防线。",
+          en: "Recommendation: enable GitHub secret scanning and push protection as a long-term safeguard.",
+        },
+        locale,
+      ),
     ].join("\n"),
   });
 }
@@ -1703,12 +2369,63 @@ function decodeGitHubFileContent(content: string, encoding: string | undefined):
   return content;
 }
 
-function buildChangelogQuestion(focus: string | undefined): string {
-  if (focus && focus.trim()) {
-    return `请根据当前 PR 改动生成可直接放入 CHANGELOG.md 的 Markdown 条目（Keep a Changelog 风格），重点覆盖：${focus.trim()}。仅输出 changelog 内容本体，不要额外说明。`;
+export function buildGitHubChangelogQuestion(
+  focus: string | undefined,
+  locale: "zh" | "en" = resolveUiLocale(),
+): string {
+  const normalizedFocus = focus?.trim() ?? "";
+  if (locale === "en") {
+    if (normalizedFocus) {
+      return `Generate a Markdown changelog entry (Keep a Changelog style) for the current PR changes, with extra focus on: ${normalizedFocus}. Output only the changelog content body without extra explanation.`;
+    }
+    return "Generate a Markdown changelog entry (Keep a Changelog style) for the current PR changes. Output only the changelog content body without extra explanation.";
+  }
+
+  if (normalizedFocus) {
+    return `请根据当前 PR 改动生成可直接放入 CHANGELOG.md 的 Markdown 条目（Keep a Changelog 风格），重点覆盖：${normalizedFocus}。仅输出 changelog 内容本体，不要额外说明。`;
   }
 
   return "请根据当前 PR 改动生成可直接放入 CHANGELOG.md 的 Markdown 条目（Keep a Changelog 风格）。仅输出 changelog 内容本体，不要额外说明。";
+}
+
+export function buildGitHubDescribeQuestion(
+  locale: "zh" | "en" = resolveUiLocale(),
+): string {
+  if (locale === "en") {
+    return [
+      "Based on current PR changes, generate a Markdown draft that can be pasted directly into the PR description.",
+      "Structure requirements: include the following headings in this exact order:",
+      "## Summary",
+      "## Change Overview",
+      "## File Walkthrough",
+      "## Test Plan",
+      "## Related Issue",
+      "Content requirements:",
+      "1) Summarize the goal and major impact of this change;",
+      "2) In Change Overview, include change size and branch information;",
+      "3) In File Walkthrough, cover key files and important changes;",
+      "4) In Test Plan, provide an executable verification checklist;",
+      "5) In Related Issue, keep the placeholder `- Closes #`.",
+      "Output requirement: return Markdown body only. No JSON, no code fences, no extra explanation.",
+    ].join("\n");
+  }
+
+  return [
+    "请基于当前 PR 的变更内容，生成一份可直接粘贴到 PR 描述区的 Markdown 草稿。",
+    "结构要求：必须包含以下标题（按顺序）：",
+    "## Summary",
+    "## Change Overview",
+    "## File Walkthrough",
+    "## Test Plan",
+    "## Related Issue",
+    "内容要求：",
+    "1) 总结本次变更的目标和主要影响；",
+    "2) Change Overview 里给出变更规模和分支信息；",
+    "3) File Walkthrough 覆盖关键文件和改动点；",
+    "4) Test Plan 给出可执行的验证清单；",
+    "5) Related Issue 保留 `- Closes #` 占位。",
+    "输出要求：只输出 Markdown 本体，不要 JSON，不要代码块，不要额外解释。",
+  ].join("\n");
 }
 
 async function applyGitHubChangelogUpdate(params: {
@@ -1719,12 +2436,19 @@ async function applyGitHubChangelogUpdate(params: {
   pullNumber: number;
   draft: string;
 }): Promise<{ message: string }> {
+  const locale = resolveUiLocale();
   const path = process.env.GITHUB_CHANGELOG_PATH?.trim() || "CHANGELOG.md";
   const title = `PR #${params.pullNumber}`;
   const octokit = params.context.octokit;
   if (!octokit.repos.createOrUpdateFileContents) {
     return {
-      message: "当前运行模式不支持自动写回仓库文件，已生成 changelog 草稿供手动应用。",
+      message: localizeText(
+        {
+          zh: "当前运行模式不支持自动写回仓库文件，已生成 changelog 草稿供手动应用。",
+          en: "Current runtime mode does not support writing back repository files automatically. A changelog draft has been generated for manual apply.",
+        },
+        locale,
+      ),
     };
   }
 
@@ -1758,19 +2482,29 @@ async function applyGitHubChangelogUpdate(params: {
   });
 
   return {
-    message: `已写入 \`${path}\`（branch: \`${params.branch}\`）。`,
+    message: localizeText(
+      {
+        zh: `已写入 \`${path}\`（branch: \`${params.branch}\`）。`,
+        en: `Written to \`${path}\` (branch: \`${params.branch}\`).`,
+      },
+      locale,
+    ),
   };
 }
 
-function mergeChangelogContent(
+export function mergeChangelogContent(
   currentContent: string,
   draft: string,
   title: string,
 ): string {
   const normalizedDraft = draft.trim();
   const safeTitle = title.trim();
-  const entry = [`### ${safeTitle}`, "", normalizedDraft].join("\n");
   const body = currentContent.trim();
+  if (body && hasChangelogTitle(body, safeTitle)) {
+    return `${body.trimEnd()}\n`;
+  }
+
+  const entry = [`### ${safeTitle}`, "", normalizedDraft].join("\n");
 
   if (!body) {
     return ["# Changelog", "", "## Unreleased", "", entry, ""].join("\n");
@@ -1784,6 +2518,20 @@ function mergeChangelogContent(
 
   const insertAt = match.index + match[0].length;
   return `${body.slice(0, insertAt)}\n\n${entry}\n${body.slice(insertAt)}`.trimEnd() + "\n";
+}
+
+function hasChangelogTitle(content: string, title: string): boolean {
+  const safeTitle = title.trim();
+  if (!safeTitle) {
+    return false;
+  }
+
+  const escapedTitle = escapeRegExp(safeTitle);
+  return new RegExp(`^###\\s+${escapedTitle}\\s*$`, "im").test(content);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function getErrorMessage(error: unknown): string {
@@ -1805,44 +2553,4 @@ function getPublicErrorMessage(error: unknown): string {
   }
 
   return "内部执行错误（详情请查看服务日志）";
-}
-
-function buildPullRequestDescriptionDraft(
-  collected: GitHubCollectedContext,
-  result: PullRequestReviewResult,
-): string {
-  const topFiles = collected.files
-    .slice(0, 12)
-    .map(
-      (file) =>
-        `- \`${file.newPath}\` (${file.status}, +${file.additions}/-${file.deletions})`,
-    );
-
-  return [
-    "## Summary",
-    result.summary,
-    "",
-    "## Change Overview",
-    `- Base -> Head: \`${collected.baseBranch}\` -> \`${collected.headBranch}\``,
-    `- Files changed: ${collected.input.changedFilesCount}`,
-    `- Additions/Deletions: +${collected.input.additions}/-${collected.input.deletions}`,
-    `- Risk level: ${result.riskLevel}`,
-    "",
-    "## File Walkthrough",
-    ...(topFiles.length > 0 ? topFiles : ["- (No textual diff available)"]),
-    "",
-    "## Review Highlights",
-    ...(result.reviews.length > 0
-      ? result.reviews
-          .slice(0, 8)
-          .map((issue) => `- [${issue.severity}] ${issue.issueHeader}`)
-      : ["- 未发现明确问题。"]),
-    "",
-    "## Test Plan",
-    "- [ ] 单元测试/集成测试已更新",
-    "- [ ] 本地或 CI 验证通过",
-    "",
-    "## Related Issue",
-    "- Closes #",
-  ].join("\n");
 }

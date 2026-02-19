@@ -41,7 +41,7 @@ export async function fetchWithRetry(
         return response;
       }
 
-      await wait(backoffMs * (attempt + 1));
+      await wait(computeRetryDelayMs(attempt, backoffMs));
     } catch (error) {
       clearTimeout(timeout);
       lastError = error;
@@ -50,7 +50,7 @@ export async function fetchWithRetry(
         break;
       }
 
-      await wait(backoffMs * (attempt + 1));
+      await wait(computeRetryDelayMs(attempt, backoffMs));
     }
   }
 
@@ -59,6 +59,22 @@ export async function fetchWithRetry(
   }
 
   throw new Error("request failed after retries");
+}
+
+export function computeRetryDelayMs(
+  attempt: number,
+  backoffMs: number,
+  randomValue = Math.random(),
+): number {
+  const safeAttempt = Math.max(0, Math.floor(attempt));
+  const safeBackoffMs = Math.max(0, Math.floor(backoffMs));
+  const baseDelay = safeBackoffMs * 2 ** safeAttempt;
+  const jitterMax = safeBackoffMs * 0.2;
+  const normalizedRandom = Number.isFinite(randomValue)
+    ? Math.min(1, Math.max(0, randomValue))
+    : 0;
+  const jitter = Math.floor(jitterMax * normalizedRandom);
+  return Math.floor(baseDelay + jitter);
 }
 
 function wait(ms: number): Promise<void> {

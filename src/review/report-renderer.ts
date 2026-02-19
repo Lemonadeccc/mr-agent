@@ -1,6 +1,6 @@
 import { getDiffSnippet } from "./patch.js";
 import { findFileForReview } from "./review-utils.js";
-import { encodePath } from "#core";
+import { encodePath, localizeText, resolveUiLocale, type UiLocale } from "#core";
 import type {
   DiffFileContext,
   PullRequestReviewResult,
@@ -173,13 +173,20 @@ export function parseFeedbackCommand(rawBody: string): {
 
 export function buildIssueCommentMarkdown(
   review: ReviewIssue,
-  options?: { platform?: "github" | "gitlab" },
+  options?: { platform?: "github" | "gitlab"; locale?: UiLocale },
 ): string {
+  const locale = options?.locale ?? resolveUiLocale();
   const content = [
     "<table>",
-    "<thead><tr><td><strong>问题</strong></td><td><strong>描述</strong></td></tr></thead>",
+    `<thead><tr><td><strong>${localizeText(
+      { zh: "问题", en: "Issue" },
+      locale,
+    )}</strong></td><td><strong>${localizeText(
+      { zh: "描述", en: "Description" },
+      locale,
+    )}</strong></td></tr></thead>`,
     "<tbody>",
-    `<tr><td>[${riskLabel(review.severity)}] ${review.issueHeader}</td><td>${review.issueContent}</td></tr>`,
+    `<tr><td>[${riskLabel(review.severity, locale)}] ${review.issueHeader}</td><td>${review.issueContent}</td></tr>`,
     "</tbody>",
     "</table>",
   ];
@@ -196,37 +203,53 @@ export function buildReportCommentMarkdown(
   result: PullRequestReviewResult,
   files: DiffFileContext[],
   context: ReportContext,
+  options?: { locale?: UiLocale },
 ): string {
+  const locale = options?.locale ?? resolveUiLocale();
   const positives =
     result.positives.length === 0
-      ? "- 无"
+      ? `- ${localizeText({ zh: "无", en: "None" }, locale)}`
       : result.positives.map((item) => `- ${item}`).join("\n");
 
   const actionItems =
     result.actionItems.length === 0
-      ? "- 无"
+      ? `- ${localizeText({ zh: "无", en: "None" }, locale)}`
       : result.actionItems.map((item) => `- ${item}`).join("\n");
 
-  const issuesTable = renderIssuesTable(result, files, context);
+  const issuesTable = renderIssuesTable(result, files, context, locale);
   const changeGraph = buildChangedFilesMermaid(files);
 
   return [
-    "## AI 代码评审报告",
+    localizeText(
+      { zh: "## AI 代码评审报告", en: "## AI Code Review Report" },
+      locale,
+    ),
     "",
-    `风险等级: **${riskLabel(result.riskLevel)}**`,
+    `${localizeText({ zh: "风险等级", en: "Risk level" }, locale)}: **${riskLabel(
+      result.riskLevel,
+      locale,
+    )}**`,
     "",
-    "### 总结",
+    localizeText({ zh: "### 总结", en: "### Summary" }, locale),
     result.summary,
     "",
     issuesTable,
     "",
-    "### 正向反馈",
+    localizeText({ zh: "### 正向反馈", en: "### Positive Notes" }, locale),
     positives,
     "",
-    "### 建议后续动作",
+    localizeText({ zh: "### 建议后续动作", en: "### Recommended Next Actions" }, locale),
     actionItems,
     ...(changeGraph
-      ? ["", "### 变更结构图（Mermaid）", "", changeGraph]
+      ? [
+          "",
+          localizeText(
+            { zh: "### 变更结构图（Mermaid）", en: "### Change Structure Diagram (Mermaid)" },
+            locale,
+          ),
+          "",
+          changeGraph,
+        ]
       : []),
   ].join("\n");
 }
@@ -235,19 +258,26 @@ function renderIssuesTable(
   result: PullRequestReviewResult,
   files: DiffFileContext[],
   context: ReportContext,
+  locale: UiLocale,
 ): string {
   if (result.reviews.length === 0) {
-    return "### 问题清单\n- 未发现明确问题。";
+    return localizeText(
+      {
+        zh: "### 问题清单\n- 未发现明确问题。",
+        en: "### Findings\n- No concrete issues found.",
+      },
+      locale,
+    );
   }
 
   let rows = "";
   for (const review of result.reviews) {
     const file = findFileForReview(files, review);
-    const location = renderIssueLocation(review, file, context);
+    const location = renderIssueLocation(review, file, context, locale);
 
     rows += [
       "<tr>",
-      `  <td>[${riskLabel(review.severity)}] ${review.issueHeader}</td>`,
+      `  <td>[${riskLabel(review.severity, locale)}] ${review.issueHeader}</td>`,
       `  <td>${location}</td>`,
       `  <td>${review.issueContent}</td>`,
       "</tr>",
@@ -256,9 +286,18 @@ function renderIssuesTable(
   }
 
   return [
-    "### 问题清单",
+    localizeText({ zh: "### 问题清单", en: "### Findings" }, locale),
     "<table>",
-    "<thead><tr><td><strong>问题</strong></td><td><strong>代码位置</strong></td><td><strong>描述</strong></td></tr></thead>",
+    `<thead><tr><td><strong>${localizeText(
+      { zh: "问题", en: "Issue" },
+      locale,
+    )}</strong></td><td><strong>${localizeText(
+      { zh: "代码位置", en: "Code Location" },
+      locale,
+    )}</strong></td><td><strong>${localizeText(
+      { zh: "描述", en: "Description" },
+      locale,
+    )}</strong></td></tr></thead>`,
     "<tbody>",
     rows.trim(),
     "</tbody>",
@@ -270,13 +309,23 @@ function renderIssueLocation(
   review: ReviewIssue,
   file: DiffFileContext | undefined,
   context: ReportContext,
+  locale: UiLocale,
 ): string {
   const path = review.type === "new" ? review.newPath : review.oldPath;
-  const lineLabel = `第${review.startLine}到${review.endLine}行`;
+  const lineLabel = localizeText(
+    {
+      zh: `第${review.startLine}到${review.endLine}行`,
+      en: `lines ${review.startLine}-${review.endLine}`,
+    },
+    locale,
+  );
   const link = buildCodeLink(review, context);
   const snippet = file
     ? getDiffSnippet(file, review.type, review.startLine, review.endLine)
-    : "(no diff snippet available)";
+    : localizeText(
+        { zh: "(无可用 diff 片段)", en: "(no diff snippet available)" },
+        locale,
+      );
 
   return [
     `[${path} ${lineLabel}](${link})`,
@@ -307,21 +356,21 @@ function buildCodeLink(review: ReviewIssue, context: ReportContext): string {
   return `${context.webUrl}/-/blob/${context.targetBranch}/${encodePath(review.oldPath)}?ref_type=heads#L${review.startLine}-${review.endLine}`;
 }
 
-function riskLabel(level: RiskLevel): string {
+function riskLabel(level: RiskLevel, locale: UiLocale = resolveUiLocale()): string {
   if (level === "high") {
-    return "高";
+    return localizeText({ zh: "高", en: "High" }, locale);
   }
 
   if (level === "medium") {
-    return "中";
+    return localizeText({ zh: "中", en: "Medium" }, locale);
   }
 
-  return "低";
+  return localizeText({ zh: "低", en: "Low" }, locale);
 }
 
 function buildSuggestionBlock(
   review: ReviewIssue,
-  platform: "github" | "gitlab" | undefined,
+  _platform: "github" | "gitlab" | undefined,
 ): string | undefined {
   if (review.type !== "new") {
     return undefined;
@@ -332,13 +381,9 @@ function buildSuggestionBlock(
     return undefined;
   }
 
-  const sanitized = suggestion.replace(/```/g, "'''" ).trim();
+  const sanitized = suggestion.replace(/```/g, "``\\`").trim();
   if (!sanitized) {
     return undefined;
-  }
-
-  if (platform === "gitlab") {
-    return ["```", sanitized, "```"].join("\n");
   }
 
   return ["```suggestion", sanitized, "```"].join("\n");

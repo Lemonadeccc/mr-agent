@@ -51,6 +51,20 @@
 - `.github/.gitlab` 模板/流程文件识别（workflow/template/CODEOWNERS/CONTRIBUTING）并给出流程建议
 - 外部 webhook 调用失败时返回结构化错误（含 `type/status/path/method/timestamp`）
 
+## 路线图与流程资产
+
+- 竞争差距落地 backlog：`docs/roadmap/2026-02-19-competitive-gap-backlog.md`
+- GitHub issue 模板：`.github/ISSUE_TEMPLATE/bug_report.md`、`.github/ISSUE_TEMPLATE/feature_request.md`
+- GitHub PR 模板：`.github/pull_request_template.md`
+- GitLab issue 模板：`.gitlab/issue_templates/Bug.md`、`.gitlab/issue_templates/Feature.md`
+- GitLab MR 模板：`.gitlab/merge_request_templates/default.md`
+
+建议的 GitHub Flow 基线：
+
+1. 开启 branch protection，至少要求 `MR Agent Policy` 与 CI 必过。
+2. 在仓库启用 `.mr-agent.yml` 的 `mode: enforce`（可先从核心仓库灰度）。
+3. 统一使用 issue/PR 模板，避免需求与验证信息缺失。
+
 ## 快速开始
 
 ```bash
@@ -172,6 +186,8 @@ GitLab MR 评论命令示例：
 }
 ```
 
+说明：请求体超过 `WEBHOOK_BODY_LIMIT`（默认 `1mb`）时会返回 `413 Payload Too Large`。
+
 ## 最小化环境变量
 
 ### 方案 A：GitHub App
@@ -221,6 +237,7 @@ OPENAI_MODEL=gpt-4.1-mini
 - `GITLAB_FEEDBACK_SIGNAL_TTL_MS`：反馈学习信号保留窗口（默认 30 天）。
 - `GITLAB_POLICY_CONFIG_CACHE_TTL_MS`：`.mr-agent.yml` 策略缓存窗口（默认 5 分钟）。
 - `GITLAB_CHANGELOG_PATH`：`/changelog --apply` 写回路径（默认 `CHANGELOG.md`）。
+- `WEBHOOK_BODY_LIMIT`：Webhook 请求体大小上限（默认 `1mb`，超限返回 `413`）。
 
 更多变量见：`.env.example`
 
@@ -309,7 +326,7 @@ OPENAI_COMPATIBLE_MODEL=deepseek-chat
 AI_PROVIDER=anthropic
 ANTHROPIC_API_KEY=replace-with-anthropic-key
 ANTHROPIC_MODEL=claude-3-5-haiku-latest
-ANTHROPIC_MAX_TOKENS=4096
+ANTHROPIC_MAX_TOKENS=8192
 ```
 
 ### Gemini
