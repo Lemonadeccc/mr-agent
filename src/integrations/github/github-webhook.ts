@@ -14,6 +14,7 @@ import { z } from "zod";
 
 import {
   buildManagedCommandCommentKey,
+  type GitHubPullFilesListParams,
   type GitHubPullsListFilesMethod,
   type GitHubRepositoryContentFile,
   recordGitHubFeedbackSignal,
@@ -49,6 +50,7 @@ const DEFAULT_GITHUB_API_URL = "https://api.github.com";
 const DEFAULT_COMMAND_RATE_LIMIT_MAX = 10;
 const DEFAULT_COMMAND_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1_000;
 const DEFAULT_GITHUB_WEBHOOK_MAX_BODY_BYTES = 10 * 1024 * 1024;
+const MAX_LIST_FILES_TRUNCATED_RECORDS = 500;
 
 interface RestGitHubClientConfig {
   token: string;
@@ -864,9 +866,26 @@ export function createRestBackedOctokit(
   config: RestGitHubClientConfig,
 ): MinimalGitHubOctokit {
   let lastListPullFilesTruncated = false;
+  const listPullFilesTruncated = new Map<string, boolean>();
+  const updateListFilesTruncated = (
+    params: GitHubPullFilesListParams,
+    truncated: boolean,
+  ) => {
+    const key = buildListPullFilesTruncatedKey(params);
+    listPullFilesTruncated.set(key, truncated);
+    while (listPullFilesTruncated.size > MAX_LIST_FILES_TRUNCATED_RECORDS) {
+      const oldest = listPullFilesTruncated.keys().next();
+      if (oldest.done) {
+        break;
+      }
+      listPullFilesTruncated.delete(oldest.value);
+    }
+    lastListPullFilesTruncated = truncated;
+  };
+
   const listFiles: GitHubPullsListFilesMethod = async (params) => {
     const result = await listPullFiles(config, params);
-    lastListPullFilesTruncated = result.truncated;
+    updateListFilesTruncated(params, result.truncated);
     return {
       data: result.files,
     };
@@ -1022,11 +1041,23 @@ export function createRestBackedOctokit(
     },
     paginate: async (_method, params) => {
       const result = await listPullFiles(config, params);
-      lastListPullFilesTruncated = result.truncated;
+      updateListFilesTruncated(params, result.truncated);
       return result.files;
     },
+    __getListFilesTruncated: (params) =>
+      listPullFilesTruncated.get(buildListPullFilesTruncatedKey(params)) ?? false,
     __getLastListFilesTruncated: () => lastListPullFilesTruncated,
   };
+}
+
+function buildListPullFilesTruncatedKey(params: GitHubPullFilesListParams): string {
+  const perPage = Math.max(1, Math.min(Number(params.per_page ?? 100), 100));
+  return [
+    params.owner.trim().toLowerCase(),
+    params.repo.trim().toLowerCase(),
+    String(params.pull_number),
+    String(perPage),
+  ].join("|");
 }
 
 async function listPullFiles(

@@ -151,13 +151,18 @@ export interface GitHubRepositoryContentFile {
   sha?: string;
 }
 
-export type GitHubPullsListFilesMethod = (params: {
+export interface GitHubPullFilesListParams {
+  [key: string]: unknown;
   owner: string;
   repo: string;
   pull_number: number;
   per_page: number;
   page?: number;
-}) => Promise<{ data: GitHubPullFile[] }>;
+}
+
+export type GitHubPullsListFilesMethod = (
+  params: GitHubPullFilesListParams,
+) => Promise<{ data: GitHubPullFile[] }>;
 
 export interface MinimalGitHubOctokit {
   repos: {
@@ -255,13 +260,9 @@ export interface MinimalGitHubOctokit {
   };
   paginate(
     method: GitHubPullsListFilesMethod,
-    params: {
-      owner: string;
-      repo: string;
-      pull_number: number;
-      per_page: number;
-    },
+    params: GitHubPullFilesListParams,
   ): Promise<GitHubPullFile[]>;
+  __getListFilesTruncated?(params: GitHubPullFilesListParams): boolean;
   __getLastListFilesTruncated?(): boolean;
 }
 
@@ -1171,7 +1172,12 @@ async function collectGitHubPullRequestContext(params: {
       pull_number: pullNumber,
       per_page: 100,
     });
-    filesTruncated = octokit.__getLastListFilesTruncated?.() ?? false;
+    filesTruncated = readGitHubListFilesTruncated(octokit, {
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: 100,
+    });
   }
 
   const changedFiles: DiffFileContext[] = [];
@@ -1282,6 +1288,16 @@ async function collectGitHubPullRequestContext(params: {
     headBranch: pr.head.ref,
     author: pr.user?.login ?? "unknown",
   };
+}
+
+function readGitHubListFilesTruncated(
+  octokit: MinimalGitHubOctokit,
+  params: GitHubPullFilesListParams,
+): boolean {
+  if (octokit.__getListFilesTruncated) {
+    return octokit.__getListFilesTruncated(params);
+  }
+  return octokit.__getLastListFilesTruncated?.() ?? false;
 }
 
 async function publishGitHubLineComments(
@@ -1822,7 +1838,12 @@ async function loadIncrementalPullFiles(params: {
     });
     return {
       files,
-      truncated: params.octokit.__getLastListFilesTruncated?.() ?? false,
+      truncated: readGitHubListFilesTruncated(params.octokit, {
+        owner: params.owner,
+        repo: params.repo,
+        pull_number: params.pullNumber,
+        per_page: 100,
+      }),
     };
   }
 
@@ -1852,7 +1873,12 @@ async function loadIncrementalPullFiles(params: {
   });
   return {
     files,
-    truncated: params.octokit.__getLastListFilesTruncated?.() ?? false,
+    truncated: readGitHubListFilesTruncated(params.octokit, {
+      owner: params.owner,
+      repo: params.repo,
+      pull_number: params.pullNumber,
+      per_page: 100,
+    }),
   };
 }
 
