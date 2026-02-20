@@ -2,6 +2,19 @@ const MAX_RATE_LIMIT_KEYS = 5_000;
 const MAX_RATE_LIMIT_KEY_IDLE_MS = 24 * 60 * 60 * 1_000;
 const rateLimitRecords = new Map<string, number[]>();
 
+export function normalizeRateLimitPart(
+  raw: string | undefined,
+  fallback: string,
+): string {
+  const normalized = (raw ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 64);
+  return normalized || fallback;
+}
+
 export function isRateLimited(key: string, limit: number, windowMs: number): boolean {
   const safeLimit = Math.max(1, Math.floor(limit));
   const safeWindowMs = Math.max(1, Math.floor(windowMs));

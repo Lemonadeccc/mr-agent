@@ -9,6 +9,7 @@ import {
   isRateLimited,
   loadAskConversationTurns,
   localizeText,
+  normalizeRateLimitPart,
   pruneExpiredCache,
   readNumberEnv,
   rememberAskConversationTurn,
@@ -582,16 +583,6 @@ function gitLabCommandRateLimitMessage(locale: "zh" | "en"): string {
     },
     locale,
   );
-}
-
-function normalizeRateLimitPart(raw: string | undefined, fallback: string): string {
-  const normalized = (raw ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]/g, "-")
-    .replace(/-+/g, "-")
-    .slice(0, 80);
-  return normalized || fallback;
 }
 
 export async function runGitLabWebhook(params: {

@@ -5,6 +5,7 @@ import {
   fetchWithRetry,
   isRateLimited,
   localizeText,
+  normalizeRateLimitPart,
   readNumberEnv,
   resolveUiLocale,
   type UiLocale,
@@ -781,16 +782,6 @@ function githubCommandRateLimitMessage(locale: UiLocale): string {
     },
     locale,
   );
-}
-
-function normalizeRateLimitPart(raw: string | undefined, fallback: string): string {
-  const normalized = (raw ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]/g, "-")
-    .replace(/-+/g, "-")
-    .slice(0, 80);
-  return normalized || fallback;
 }
 
 function parsePayload<T>(
