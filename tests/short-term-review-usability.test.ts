@@ -377,6 +377,16 @@ test("openai-compatible fallback only for unsupported json_schema style 400 erro
     }),
     true,
   );
+
+  assert.equal(
+    shouldFallbackToJsonObject({
+      status: 400,
+      error: {
+        message: "不合法的response_format",
+      },
+    }),
+    true,
+  );
 });
 
 test("openai-compatible fallback does not swallow auth/rate-limit/network errors", () => {

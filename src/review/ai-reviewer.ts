@@ -717,32 +717,62 @@ async function analyzeWithOpenAI(params: {
       throw error;
     }
 
-    const completion = await client.chat.completions.create(
-      {
-        model: params.model,
-        temperature: 0.2,
-        messages: [
-          {
-            role: "system",
-            content: systemPrompt,
+    try {
+      const completion = await client.chat.completions.create(
+        {
+          model: params.model,
+          temperature: 0.2,
+          messages: [
+            {
+              role: "system",
+              content: systemPrompt,
+            },
+            {
+              role: "user",
+              content: `${params.prompt}\n\n请直接返回 JSON。`,
+            },
+          ],
+          response_format: {
+            type: "json_object",
           },
-          {
-            role: "user",
-            content: `${params.prompt}\n\n请直接返回 JSON。`,
-          },
-        ],
-        response_format: {
-          type: "json_object",
         },
-      },
-      {
-        signal: getHttpShutdownSignal(),
-      },
-    );
+        {
+          signal: getHttpShutdownSignal(),
+        },
+      );
 
-    return parseJsonFromModelText(
-      extractText(completion.choices[0]?.message.content),
-    );
+      return parseJsonFromModelText(
+        extractText(completion.choices[0]?.message.content),
+      );
+    } catch (fallbackError) {
+      if (!shouldFallbackToJsonObject(fallbackError)) {
+        throw fallbackError;
+      }
+
+      const completion = await client.chat.completions.create(
+        {
+          model: params.model,
+          temperature: 0.2,
+          messages: [
+            {
+              role: "system",
+              content: systemPrompt,
+            },
+            {
+              role: "user",
+              content: `${params.prompt}\n\n请直接返回 JSON。`,
+            },
+          ],
+        },
+        {
+          signal: getHttpShutdownSignal(),
+        },
+      );
+
+      return parseJsonFromModelText(
+        extractText(completion.choices[0]?.message.content),
+      );
+    }
   }
 }
 
@@ -845,32 +875,62 @@ async function askWithOpenAI(params: {
       throw error;
     }
 
-    const completion = await client.chat.completions.create(
-      {
-        model: params.model,
-        temperature: 0.2,
-        messages: [
-          {
-            role: "system",
-            content: systemPrompt,
+    try {
+      const completion = await client.chat.completions.create(
+        {
+          model: params.model,
+          temperature: 0.2,
+          messages: [
+            {
+              role: "system",
+              content: systemPrompt,
+            },
+            {
+              role: "user",
+              content: `${params.prompt}\n\n请直接返回 JSON。`,
+            },
+          ],
+          response_format: {
+            type: "json_object",
           },
-          {
-            role: "user",
-            content: `${params.prompt}\n\n请直接返回 JSON。`,
-          },
-        ],
-        response_format: {
-          type: "json_object",
         },
-      },
-      {
-        signal: getHttpShutdownSignal(),
-      },
-    );
+        {
+          signal: getHttpShutdownSignal(),
+        },
+      );
 
-    return parseJsonFromModelText(
-      extractText(completion.choices[0]?.message.content),
-    );
+      return parseJsonFromModelText(
+        extractText(completion.choices[0]?.message.content),
+      );
+    } catch (fallbackError) {
+      if (!shouldFallbackToJsonObject(fallbackError)) {
+        throw fallbackError;
+      }
+
+      const completion = await client.chat.completions.create(
+        {
+          model: params.model,
+          temperature: 0.2,
+          messages: [
+            {
+              role: "system",
+              content: systemPrompt,
+            },
+            {
+              role: "user",
+              content: `${params.prompt}\n\n请直接返回 JSON。`,
+            },
+          ],
+        },
+        {
+          signal: getHttpShutdownSignal(),
+        },
+      );
+
+      return parseJsonFromModelText(
+        extractText(completion.choices[0]?.message.content),
+      );
+    }
   }
 }
 
@@ -894,7 +954,14 @@ export function shouldFallbackToJsonObject(error: unknown): boolean {
   return (
     message.includes("unsupported") ||
     message.includes("not support") ||
-    message.includes("not implemented")
+    message.includes("not implemented") ||
+    message.includes("invalid") ||
+    message.includes("illegal") ||
+    message.includes("not valid") ||
+    message.includes("not allowed") ||
+    message.includes("不合法") ||
+    message.includes("非法") ||
+    message.includes("无效")
   );
 }
 
