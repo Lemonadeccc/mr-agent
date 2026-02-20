@@ -905,6 +905,7 @@ export async function runGitLabReview(
     clearDuplicateRecord(requestKey);
     const originalError = ensureError(error);
     const reason = originalError.message;
+    const publicReason = getPublicErrorMessage(originalError);
 
     logger.error({ error: reason }, "GitLab AI review failed");
     const pushUrl =
@@ -922,8 +923,8 @@ export async function runGitLabReview(
         targetBranch: payload.object_attributes.target_branch ?? "-",
         content: localizeText(
           {
-            zh: `代码评审失败: ${reason}`,
-            en: `Code review failed: ${reason}`,
+            zh: `代码评审失败: ${publicReason}`,
+            en: `Code review failed: ${publicReason}`,
           },
           locale,
         ),
@@ -1032,11 +1033,7 @@ async function handleGitLabNoteWebhook(params: {
     if (!policy.feedbackCommandEnabled) {
       await publishGitLabGeneralComment(
         gitlabToken,
-        await collectGitLabMergeRequestContext({
-          payload: mergePayload,
-          gitlabToken,
-          baseUrl: process.env.GITLAB_BASE_URL,
-        }),
+        target,
         localizeText(
           {
             zh: "`/feedback` 在当前仓库已被禁用（.mr-agent.yml -> review.feedbackCommandEnabled=false）。",
@@ -1094,14 +1091,9 @@ async function handleGitLabNoteWebhook(params: {
       return { ok: true, message: "describe command rate limited" };
     }
     if (!policy.describeEnabled) {
-      const context = await collectGitLabMergeRequestContext({
-        payload: mergePayload,
-        gitlabToken,
-        baseUrl: process.env.GITLAB_BASE_URL,
-      });
       await publishGitLabGeneralComment(
         gitlabToken,
-        context,
+        target,
         localizeText(
           {
             zh: "`/describe` 在当前仓库已被禁用（.mr-agent.yml -> review.describeEnabled=false）。",
@@ -1113,14 +1105,9 @@ async function handleGitLabNoteWebhook(params: {
       return { ok: true, message: "describe command ignored by policy" };
     }
     if (describe.apply && !policy.describeAllowApply) {
-      const context = await collectGitLabMergeRequestContext({
-        payload: mergePayload,
-        gitlabToken,
-        baseUrl: process.env.GITLAB_BASE_URL,
-      });
       await publishGitLabGeneralComment(
         gitlabToken,
-        context,
+        target,
         localizeText(
           {
             zh: "`/describe --apply` 在当前仓库已被禁用（.mr-agent.yml -> review.describeAllowApply=false）。",
@@ -1158,14 +1145,9 @@ async function handleGitLabNoteWebhook(params: {
       return { ok: true, message: "ask command rate limited" };
     }
     if (!policy.askCommandEnabled) {
-      const context = await collectGitLabMergeRequestContext({
-        payload: mergePayload,
-        gitlabToken,
-        baseUrl: process.env.GITLAB_BASE_URL,
-      });
       await publishGitLabGeneralComment(
         gitlabToken,
-        context,
+        target,
         localizeText(
           {
             zh: "`/ask` 在当前仓库已被禁用（.mr-agent.yml -> review.askCommandEnabled=false）。",
@@ -1207,14 +1189,9 @@ async function handleGitLabNoteWebhook(params: {
       return { ok: true, message: "checks command rate limited" };
     }
     if (!policy.checksCommandEnabled) {
-      const context = await collectGitLabMergeRequestContext({
-        payload: mergePayload,
-        gitlabToken,
-        baseUrl: process.env.GITLAB_BASE_URL,
-      });
       await publishGitLabGeneralComment(
         gitlabToken,
-        context,
+        target,
         localizeText(
           {
             zh: "`/checks` 在当前仓库已被禁用（.mr-agent.yml -> review.checksCommandEnabled=false）。",
@@ -1262,14 +1239,9 @@ async function handleGitLabNoteWebhook(params: {
       return { ok: true, message: "generate_tests command rate limited" };
     }
     if (!policy.generateTestsCommandEnabled) {
-      const context = await collectGitLabMergeRequestContext({
-        payload: mergePayload,
-        gitlabToken,
-        baseUrl: process.env.GITLAB_BASE_URL,
-      });
       await publishGitLabGeneralComment(
         gitlabToken,
-        context,
+        target,
         localizeText(
           {
             zh: "`/generate_tests` 在当前仓库已被禁用（.mr-agent.yml -> review.generateTestsCommandEnabled=false）。",
@@ -1320,14 +1292,9 @@ async function handleGitLabNoteWebhook(params: {
       return { ok: true, message: "changelog command rate limited" };
     }
     if (!policy.changelogCommandEnabled) {
-      const context = await collectGitLabMergeRequestContext({
-        payload: mergePayload,
-        gitlabToken,
-        baseUrl: process.env.GITLAB_BASE_URL,
-      });
       await publishGitLabGeneralComment(
         gitlabToken,
-        context,
+        target,
         localizeText(
           {
             zh: "`/changelog` 在当前仓库已被禁用（.mr-agent.yml -> review.changelogCommandEnabled=false）。",
@@ -1339,14 +1306,9 @@ async function handleGitLabNoteWebhook(params: {
       return { ok: true, message: "changelog command ignored by policy" };
     }
     if (changelogCommand.apply && !policy.changelogAllowApply) {
-      const context = await collectGitLabMergeRequestContext({
-        payload: mergePayload,
-        gitlabToken,
-        baseUrl: process.env.GITLAB_BASE_URL,
-      });
       await publishGitLabGeneralComment(
         gitlabToken,
-        context,
+        target,
         localizeText(
           {
             zh: "`/changelog --apply` 在当前仓库已被禁用（.mr-agent.yml -> review.changelogAllowApply=false）。",
@@ -2497,7 +2459,7 @@ async function resolveGitLabReviewPolicy(params: {
   return resolved;
 }
 
-function parseGitLabReviewPolicyConfig(raw: string): GitLabReviewPolicy {
+export function parseGitLabReviewPolicyConfig(raw: string): GitLabReviewPolicy {
   const policy: GitLabReviewPolicy = {
     ...defaultGitLabReviewPolicy,
     customRules: [...defaultGitLabReviewPolicy.customRules],
@@ -2571,7 +2533,10 @@ function parseGitLabReviewPolicyConfig(raw: string): GitLabReviewPolicy {
       continue;
     }
     if (keyLower === "mode") {
-      policy.mode = valueRaw.toLowerCase() === "comment" ? "comment" : "report";
+      const normalizedMode = stripYamlQuotes(valueRaw).trim().toLowerCase();
+      if (normalizedMode === "comment" || normalizedMode === "report") {
+        policy.mode = normalizedMode;
+      }
       continue;
     }
     if ((keyLower === "onopened" || keyLower === "on_opened") && bool !== undefined) {
@@ -2675,7 +2640,7 @@ function parseGitLabReviewPolicyConfig(raw: string): GitLabReviewPolicy {
 }
 
 function parseYamlBoolean(raw: string): boolean | undefined {
-  const normalized = raw.trim().toLowerCase();
+  const normalized = stripYamlQuotes(raw).trim().toLowerCase();
   if (["true", "yes", "on", "1"].includes(normalized)) {
     return true;
   }
@@ -3129,7 +3094,7 @@ export function inferMergeRequestLabels(params: {
   return Array.from(labels).slice(0, 10);
 }
 
-async function tryAddGitLabMergeRequestLabels(params: {
+export async function tryAddGitLabMergeRequestLabels(params: {
   gitlabToken: string;
   collected: GitLabCollectedContext;
   labels: string[];
@@ -3140,7 +3105,7 @@ async function tryAddGitLabMergeRequestLabels(params: {
   }
 
   try {
-    await fetchWithRetry(
+    const response = await fetchWithRetry(
       `${params.collected.baseUrl}/api/v4/projects/${encodeURIComponent(params.collected.projectId)}/merge_requests/${params.collected.mrId}`,
       {
         method: "PUT",
@@ -3158,6 +3123,12 @@ async function tryAddGitLabMergeRequestLabels(params: {
         backoffMs: readNumberEnv("GITLAB_HTTP_RETRY_BACKOFF_MS", 400),
       },
     );
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `GitLab labels API failed (${response.status}): ${errorText.slice(0, 300)}`,
+      );
+    }
   } catch (error) {
     params.logger.error(
       {
@@ -3257,6 +3228,22 @@ export function buildGitLabDescribeQuestion(
   ].join("\n");
 }
 
+function getPublicErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const allowList = [
+    /^Missing\s+[A-Z0-9_]+/,
+    /^Unsupported AI_PROVIDER/,
+    /^Model returned empty/,
+    /^Model response is not valid JSON/,
+  ];
+
+  if (allowList.some((pattern) => pattern.test(message))) {
+    return message;
+  }
+
+  return "内部执行错误（详情请查看服务日志）";
+}
+
 async function applyGitLabChangelogUpdate(params: {
   gitlabToken: string;
   collected: GitLabCollectedContext;
@@ -3290,7 +3277,7 @@ async function applyGitLabChangelogUpdate(params: {
     // create new file fallback
   }
 
-  const merged = mergeChangelogContent(
+  const merged = mergeGitLabChangelogContent(
     existing,
     params.draft,
     `MR !${params.pullNumber}`,
@@ -3339,15 +3326,19 @@ async function applyGitLabChangelogUpdate(params: {
   };
 }
 
-function mergeChangelogContent(
+export function mergeGitLabChangelogContent(
   currentContent: string,
   draft: string,
   title: string,
 ): string {
   const normalizedDraft = draft.trim();
   const safeTitle = title.trim();
-  const entry = [`### ${safeTitle}`, "", normalizedDraft].join("\n");
   const body = currentContent.trim();
+  if (body && hasGitLabChangelogTitle(body, safeTitle)) {
+    return `${body.trimEnd()}\n`;
+  }
+
+  const entry = [`### ${safeTitle}`, "", normalizedDraft].join("\n");
 
   if (!body) {
     return ["# Changelog", "", "## Unreleased", "", entry, ""].join("\n");
@@ -3361,4 +3352,14 @@ function mergeChangelogContent(
 
   const insertAt = match.index + match[0].length;
   return `${body.slice(0, insertAt)}\n\n${entry}\n${body.slice(insertAt)}`.trimEnd() + "\n";
+}
+
+function hasGitLabChangelogTitle(content: string, title: string): boolean {
+  const safeTitle = title.trim();
+  if (!safeTitle) {
+    return false;
+  }
+
+  const escapedTitle = safeTitle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^###\\s+${escapedTitle}\\s*$`, "im").test(content);
 }

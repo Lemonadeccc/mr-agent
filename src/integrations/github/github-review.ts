@@ -960,8 +960,8 @@ export async function runGitHubReview(
         targetBranch: "-",
         content: localizeText(
           {
-            zh: `代码评审失败: ${reason}`,
-            en: `Code review failed: ${reason}`,
+            zh: `代码评审失败: ${publicReason}`,
+            en: `Code review failed: ${publicReason}`,
           },
           locale,
         ),

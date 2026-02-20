@@ -815,6 +815,12 @@ function verifyWebhookSignature(
   const skipSignature =
     (process.env.GITHUB_WEBHOOK_SKIP_SIGNATURE ?? "").toLowerCase() === "true";
   if (skipSignature) {
+    if ((process.env.NODE_ENV ?? "").trim().toLowerCase() === "production") {
+      throw new WebhookAuthError(
+        "GITHUB_WEBHOOK_SKIP_SIGNATURE is forbidden in production",
+        403,
+      );
+    }
     return;
   }
 
