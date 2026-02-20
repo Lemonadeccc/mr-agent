@@ -386,10 +386,6 @@ function buildSuggestionBlock(
   review: ReviewIssue,
   _platform: "github" | "gitlab" | undefined,
 ): string | undefined {
-  if (review.type !== "new") {
-    return undefined;
-  }
-
   const suggestion = review.suggestion?.trim();
   if (!suggestion) {
     return undefined;
@@ -398,6 +394,15 @@ function buildSuggestionBlock(
   const sanitized = suggestion.replace(/```/g, "``\\`").trim();
   if (!sanitized) {
     return undefined;
+  }
+
+  if (review.type !== "new") {
+    return [
+      "```text",
+      "Suggested fix (cannot be auto-applied on old/deleted lines):",
+      sanitized,
+      "```",
+    ].join("\n");
   }
 
   return ["```suggestion", sanitized, "```"].join("\n");
