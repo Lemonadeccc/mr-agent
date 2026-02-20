@@ -215,6 +215,31 @@ OPENAI_API_KEY=replace-with-openai-key
 OPENAI_MODEL=gpt-4.1-mini
 ```
 
+### 单实例部署推荐（状态持久化 + 默认关闭 replay）
+
+```env
+RUNTIME_STATE_BACKEND=sqlite
+RUNTIME_STATE_SQLITE_FILE=/data/mr-agent/runtime-state.sqlite3
+WEBHOOK_EVENT_STORE_ENABLED=false
+WEBHOOK_REPLAY_ENABLED=false
+```
+
+### 排障时临时开启 replay（仅临时）
+
+```env
+WEBHOOK_EVENT_STORE_ENABLED=true
+WEBHOOK_REPLAY_ENABLED=true
+WEBHOOK_REPLAY_TOKEN=replace-with-strong-random-token
+```
+
+可用接口：
+
+- `GET /webhook/events`（列出已存储 webhook 事件）
+- `POST /github/replay/:eventId`
+- `POST /gitlab/replay/:eventId`
+
+以上接口需请求头：`x-mr-agent-replay-token: <WEBHOOK_REPLAY_TOKEN>`
+
 ### `GITHUB_MERGED_DEDUPE_TTL_MS`（推荐值与调参）
 
 - 作用：控制 GitHub `merged + report` 事件的去重窗口（单位毫秒），防止 webhook 重投时重复评审。

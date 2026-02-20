@@ -35,6 +35,23 @@ OPENAI_API_KEY=replace-with-openai-key
 OPENAI_MODEL=gpt-4.1-mini
 ```
 
+### 单实例推荐补充配置
+
+```env
+RUNTIME_STATE_BACKEND=sqlite
+RUNTIME_STATE_SQLITE_FILE=/data/mr-agent/runtime-state.sqlite3
+WEBHOOK_EVENT_STORE_ENABLED=false
+WEBHOOK_REPLAY_ENABLED=false
+```
+
+排障时临时开启 replay：
+
+```env
+WEBHOOK_EVENT_STORE_ENABLED=true
+WEBHOOK_REPLAY_ENABLED=true
+WEBHOOK_REPLAY_TOKEN=replace-with-strong-random-token
+```
+
 ## 3) 启动
 
 ```bash
@@ -90,5 +107,13 @@ docker run -d --name mr-agent -p 3000:3000 --env-file .env mr-agent:latest
 - `GET /health`
 - `GET /github/health`
 - `GET /gitlab/health`
+- `GET /metrics`
 - 在 PR 评论：`/ai-review` / `/ai-review comment`
 - 失败时 webhook 会返回结构化错误 JSON（`error/type/status/path/method/timestamp`）
+
+若开启 replay：
+
+- `GET /webhook/events`
+- `POST /github/replay/:eventId`
+- `POST /gitlab/replay/:eventId`
+- 请求头：`x-mr-agent-replay-token: <WEBHOOK_REPLAY_TOKEN>`
