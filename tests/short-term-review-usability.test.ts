@@ -1681,13 +1681,13 @@ test("ask prompt excludes process/template section while review prompt includes 
   assert.match(reviewPrompt, /Process\/template files in this change:/);
 });
 
-test("ui locale resolver supports en variants and defaults to zh", () => {
+test("ui locale resolver supports en variants and defaults to en", () => {
   assert.equal(resolveUiLocale("en"), "en");
   assert.equal(resolveUiLocale("EN-us"), "en");
   assert.equal(resolveUiLocale("english"), "en");
   assert.equal(resolveUiLocale("zh"), "zh");
-  assert.equal(resolveUiLocale(undefined), "zh");
-  assert.equal(resolveUiLocale(""), "zh");
+  assert.equal(resolveUiLocale(undefined), "en");
+  assert.equal(resolveUiLocale(""), "en");
 });
 
 test("github truncated warning supports english locale", () => {

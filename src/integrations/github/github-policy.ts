@@ -1,9 +1,12 @@
 import {
   isDuplicateRequest,
+  localizeText,
   pruneExpiredCache,
   readNumberEnv,
+  resolveUiLocale,
   trimCache,
   type ExpiringCacheEntry,
+  type UiLocale,
 } from "#core";
 import type { ReviewMode } from "#review";
 import { load as loadYaml } from "js-yaml";
@@ -208,6 +211,7 @@ export async function runGitHubIssuePolicyCheck(params: {
   const { context, issueNumber } = params;
   const { owner, repo } = context.repo();
   const ref = params.ref;
+  const locale = resolveUiLocale();
 
   const config = await loadRepositoryPolicyConfig({
     context,
@@ -228,6 +232,7 @@ export async function runGitHubIssuePolicyCheck(params: {
     body: params.body ?? "",
     minBodyLength: config.issue.minBodyLength,
     requiredSections,
+    locale,
   });
   if (result.missing.length === 0) {
     return;
@@ -241,6 +246,7 @@ export async function runGitHubIssuePolicyCheck(params: {
     kind: "issue",
     missing: result.missing,
     mode: config.mode,
+    locale,
   });
 }
 
@@ -256,6 +262,7 @@ export async function runGitHubPullRequestPolicyCheck(params: {
   const { context, pullNumber } = params;
   const { owner, repo } = context.repo();
   const ref = params.baseRef;
+  const locale = resolveUiLocale();
 
   const config = await loadRepositoryPolicyConfig({
     context,
@@ -277,6 +284,7 @@ export async function runGitHubPullRequestPolicyCheck(params: {
     minBodyLength: config.pullRequest.minBodyLength,
     requiredSections,
     requireLinkedIssue: config.pullRequest.requireLinkedIssue,
+    locale,
   });
 
   if (result.missing.length > 0) {
@@ -288,6 +296,7 @@ export async function runGitHubPullRequestPolicyCheck(params: {
       kind: "pull_request",
       missing: result.missing,
       mode: config.mode,
+      locale,
     });
   }
 
@@ -299,6 +308,7 @@ export async function runGitHubPullRequestPolicyCheck(params: {
       headSha: params.headSha,
       detailsUrl: params.detailsUrl,
       missing: result.missing,
+      locale,
     });
   }
 }
@@ -598,25 +608,51 @@ function validateIssueBody(params: {
   body: string;
   minBodyLength: number;
   requiredSections: string[];
+  locale: UiLocale;
 }): { missing: string[] } {
   const missing: string[] = [];
   if (!params.title.trim()) {
-    missing.push("Issue 标题不能为空");
+    missing.push(
+      localizeText(
+        { zh: "Issue 标题不能为空", en: "Issue title is required" },
+        params.locale,
+      ),
+    );
   }
 
   const body = params.body.trim();
   if (!body) {
-    missing.push("Issue 描述不能为空");
+    missing.push(
+      localizeText(
+        { zh: "Issue 描述不能为空", en: "Issue body is required" },
+        params.locale,
+      ),
+    );
     return { missing };
   }
 
   if (body.length < Math.max(1, params.minBodyLength)) {
-    missing.push(`Issue 描述至少 ${Math.max(1, params.minBodyLength)} 个字符`);
+    missing.push(
+      localizeText(
+        {
+          zh: `Issue 描述至少 ${Math.max(1, params.minBodyLength)} 个字符`,
+          en: `Issue body must be at least ${Math.max(1, params.minBodyLength)} characters`,
+        },
+        params.locale,
+      ),
+    );
   }
 
   missing.push(
     ...findMissingSections(body, params.requiredSections).map(
-      (section) => `缺少或未填写模板段落: ${section}`,
+      (section) =>
+        localizeText(
+          {
+            zh: `缺少或未填写模板段落: ${section}`,
+            en: `Missing or empty template section: ${section}`,
+          },
+          params.locale,
+        ),
     ),
   );
 
@@ -629,25 +665,59 @@ function validatePullRequestBody(params: {
   minBodyLength: number;
   requiredSections: string[];
   requireLinkedIssue: boolean;
+  locale: UiLocale;
 }): { missing: string[] } {
   const missing: string[] = [];
   if (!params.title.trim()) {
-    missing.push("PR 标题不能为空");
+    missing.push(
+      localizeText(
+        { zh: "PR 标题不能为空", en: "PR title is required" },
+        params.locale,
+      ),
+    );
   }
 
   const body = params.body.trim();
   if (!body) {
-    missing.push("PR 描述不能为空");
+    missing.push(
+      localizeText(
+        { zh: "PR 描述不能为空", en: "PR body is required" },
+        params.locale,
+      ),
+    );
   } else {
     if (body.length < Math.max(1, params.minBodyLength)) {
-      missing.push(`PR 描述至少 ${Math.max(1, params.minBodyLength)} 个字符`);
+      missing.push(
+        localizeText(
+          {
+            zh: `PR 描述至少 ${Math.max(1, params.minBodyLength)} 个字符`,
+            en: `PR body must be at least ${Math.max(1, params.minBodyLength)} characters`,
+          },
+          params.locale,
+        ),
+      );
     }
     if (params.requireLinkedIssue && !containsIssueReference(body)) {
-      missing.push("PR 描述中需要关联 Issue（例如 #123）");
+      missing.push(
+        localizeText(
+          {
+            zh: "PR 描述中需要关联 Issue（例如 #123）",
+            en: "PR body must reference an issue (for example: #123)",
+          },
+          params.locale,
+        ),
+      );
     }
     missing.push(
       ...findMissingSections(body, params.requiredSections).map(
-        (section) => `缺少或未填写模板段落: ${section}`,
+        (section) =>
+          localizeText(
+            {
+              zh: `缺少或未填写模板段落: ${section}`,
+              en: `Missing or empty template section: ${section}`,
+            },
+            params.locale,
+          ),
       ),
     );
   }
@@ -663,6 +733,7 @@ async function publishPolicyReminderComment(params: {
   kind: "issue" | "pull_request";
   missing: string[];
   mode: PolicyMode;
+  locale: UiLocale;
 }): Promise<void> {
   const dedupeKey = [
     "github-policy-reminder",
@@ -680,21 +751,53 @@ async function publishPolicyReminderComment(params: {
   }
 
   const title =
-    params.kind === "issue" ? "Issue 模板预检未通过" : "PR 流程预检未通过";
+    params.kind === "issue"
+      ? localizeText(
+          { zh: "Issue 模板预检未通过", en: "Issue template pre-check failed" },
+          params.locale,
+        )
+      : localizeText(
+          { zh: "PR 流程预检未通过", en: "PR flow pre-check failed" },
+          params.locale,
+        );
   const modeHint =
     params.mode === "enforce"
-      ? "当前仓库模式：`enforce`（会写入失败检查）"
-      : "当前仓库模式：`remind`（仅提醒，不阻塞）";
+      ? localizeText(
+          {
+            zh: "当前仓库模式：`enforce`（会写入失败检查）",
+            en: "Repository mode: `enforce` (failed check run will be posted)",
+          },
+          params.locale,
+        )
+      : localizeText(
+          {
+            zh: "当前仓库模式：`remind`（仅提醒，不阻塞）",
+            en: "Repository mode: `remind` (reminder only, non-blocking)",
+          },
+          params.locale,
+        );
   const body = [
-    "## MR Agent 流程守卫",
+    localizeText(
+      { zh: "## MR Agent 流程守卫", en: "## MR Agent Flow Guard" },
+      params.locale,
+    ),
     "",
     `**${title}**`,
     modeHint,
     "",
-    "请补充以下项：",
+    localizeText(
+      { zh: "请补充以下项：", en: "Please complete the following items:" },
+      params.locale,
+    ),
     ...params.missing.map((item) => `- [ ] ${item}`),
     "",
-    "可在仓库根目录 `.mr-agent.yml` 调整规则（`remind` / `enforce`）。",
+    localizeText(
+      {
+        zh: "可在仓库根目录 `.mr-agent.yml` 调整规则（`remind` / `enforce`）。",
+        en: "You can tune these rules in `.mr-agent.yml` (`remind` / `enforce`).",
+      },
+      params.locale,
+    ),
   ].join("\n");
 
   try {
@@ -725,6 +828,7 @@ async function publishPolicyCheckRun(params: {
   headSha: string;
   detailsUrl?: string;
   missing: string[];
+  locale: UiLocale;
 }): Promise<void> {
   if (!params.context.octokit.checks?.create) {
     params.context.log.error(
@@ -737,13 +841,33 @@ async function publishPolicyCheckRun(params: {
   const passed = params.missing.length === 0;
   const checkName = process.env.GITHUB_POLICY_CHECK_NAME?.trim() || DEFAULT_POLICY_CHECK_NAME;
   const output: NonNullable<GitHubCheckRunCreateParams["output"]> = {
-    title: passed ? "GitHub Flow pre-check passed" : "GitHub Flow pre-check failed",
+    title: passed
+      ? localizeText(
+          { zh: "GitHub 流程预检通过", en: "GitHub Flow pre-check passed" },
+          params.locale,
+        )
+      : localizeText(
+          { zh: "GitHub 流程预检失败", en: "GitHub Flow pre-check failed" },
+          params.locale,
+        ),
     summary: passed
-      ? "所有必填流程项已满足。"
-      : ["以下项未通过：", ...params.missing.map((item) => `- ${item}`)].join("\n"),
+      ? localizeText(
+          { zh: "所有必填流程项已满足。", en: "All required flow items are satisfied." },
+          params.locale,
+        )
+      : [
+          localizeText(
+            { zh: "以下项未通过：", en: "The following items failed:" },
+            params.locale,
+          ),
+          ...params.missing.map((item) => `- ${item}`),
+        ].join("\n"),
   };
   if (params.detailsUrl) {
-    output.text = `详情: ${params.detailsUrl}`;
+    output.text = localizeText(
+      { zh: `详情: ${params.detailsUrl}`, en: `Details: ${params.detailsUrl}` },
+      params.locale,
+    );
   }
 
   const request: GitHubCheckRunCreateParams = {
