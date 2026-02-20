@@ -21,6 +21,10 @@ interface OpenAIClientCacheConfig {
 
 const openAIClientCache = new Map<string, OpenAI>();
 const DEFAULT_MAX_OPENAI_CLIENT_CACHE_ENTRIES = 200;
+const DEFAULT_AI_MAX_CONCURRENCY = 4;
+
+let activeAiRequests = 0;
+const aiConcurrencyWaitQueue: Array<() => void> = [];
 
 const reviewIssueSchema = z.object({
   severity: z.enum(["low", "medium", "high"]),
@@ -171,6 +175,17 @@ export function __clearOpenAIClientCacheForTests(): void {
   openAIClientCache.clear();
 }
 
+export function __resetAiConcurrencyForTests(): void {
+  activeAiRequests = 0;
+  aiConcurrencyWaitQueue.length = 0;
+}
+
+export function __withAiConcurrencyLimitForTests<T>(
+  task: () => Promise<T>,
+): Promise<T> {
+  return withAiConcurrencyLimit(task);
+}
+
 function hashApiKey(apiKey: string): string {
   return createHash("sha256").update(apiKey).digest("hex");
 }
@@ -192,6 +207,41 @@ function trimOpenAIClientCache(): void {
   }
 }
 
+function resolveAiMaxConcurrency(): number {
+  return Math.max(1, readNumberEnv("AI_MAX_CONCURRENCY", DEFAULT_AI_MAX_CONCURRENCY));
+}
+
+async function acquireAiConcurrencySlot(): Promise<void> {
+  const limit = resolveAiMaxConcurrency();
+  if (activeAiRequests < limit) {
+    activeAiRequests += 1;
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    aiConcurrencyWaitQueue.push(resolve);
+  });
+}
+
+function releaseAiConcurrencySlot(): void {
+  const next = aiConcurrencyWaitQueue.shift();
+  if (next) {
+    next();
+    return;
+  }
+
+  activeAiRequests = Math.max(0, activeAiRequests - 1);
+}
+
+async function withAiConcurrencyLimit<T>(task: () => Promise<T>): Promise<T> {
+  await acquireAiConcurrencySlot();
+  try {
+    return await task();
+  } finally {
+    releaseAiConcurrencySlot();
+  }
+}
+
 export async function analyzePullRequest(
   pullRequest: PullRequestReviewInput,
 ): Promise<PullRequestReviewResult> {
@@ -199,14 +249,15 @@ export async function analyzePullRequest(
   const model = resolveModel(provider);
   const prompt = buildUserPrompt(pullRequest);
 
-  let parsed: unknown;
-  if (provider === "openai" || provider === "openai-compatible") {
-    parsed = await analyzeWithOpenAI({ provider, model, prompt });
-  } else if (provider === "anthropic") {
-    parsed = await analyzeWithAnthropic({ model, prompt });
-  } else {
-    parsed = await analyzeWithGemini({ model, prompt });
-  }
+  const parsed = await withAiConcurrencyLimit(async () => {
+    if (provider === "openai" || provider === "openai-compatible") {
+      return analyzeWithOpenAI({ provider, model, prompt });
+    }
+    if (provider === "anthropic") {
+      return analyzeWithAnthropic({ model, prompt });
+    }
+    return analyzeWithGemini({ model, prompt });
+  });
 
   const result = reviewResultSchema.parse(parsed);
   return {
@@ -240,14 +291,15 @@ export async function answerPullRequestQuestion(
     options?.conversation ?? [],
   );
 
-  let parsed: unknown;
-  if (provider === "openai" || provider === "openai-compatible") {
-    parsed = await askWithOpenAI({ provider, model, prompt });
-  } else if (provider === "anthropic") {
-    parsed = await askWithAnthropic({ model, prompt });
-  } else {
-    parsed = await askWithGemini({ model, prompt });
-  }
+  const parsed = await withAiConcurrencyLimit(async () => {
+    if (provider === "openai" || provider === "openai-compatible") {
+      return askWithOpenAI({ provider, model, prompt });
+    }
+    if (provider === "anthropic") {
+      return askWithAnthropic({ model, prompt });
+    }
+    return askWithGemini({ model, prompt });
+  });
 
   const result = askResultSchema.parse(parsed);
   return result.answer.trim();
