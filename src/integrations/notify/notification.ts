@@ -10,6 +10,8 @@ interface PublishNotificationParams {
   logger?: NotificationLoggerLike;
 }
 
+type NotificationWebhookFormat = "wecom" | "slack" | "discord" | "generic";
+
 export async function publishNotification(
   params: PublishNotificationParams,
 ): Promise<void> {
@@ -23,6 +25,7 @@ export async function publishNotification(
     `源分支：**${params.sourceBranch}**\n` +
     `目标分支：**${params.targetBranch}**\n\n` +
     params.content;
+  const payload = buildNotificationPayload(markdown, resolveNotificationWebhookFormat());
 
   try {
     const response = await fetchWithRetry(
@@ -32,12 +35,7 @@ export async function publishNotification(
         headers: {
           "content-type": "application/json",
         },
-        body: JSON.stringify({
-          msgtype: "markdown",
-          markdown: {
-            content: markdown,
-          },
-        }),
+        body: JSON.stringify(payload),
       },
       {
         timeoutMs: readNumberEnv("NOTIFY_HTTP_TIMEOUT_MS", 15_000),
@@ -61,6 +59,45 @@ export async function publishNotification(
       "Notification delivery failed",
     );
   }
+}
+
+function resolveNotificationWebhookFormat(): NotificationWebhookFormat {
+  const raw = (process.env.NOTIFY_WEBHOOK_FORMAT ?? "").trim().toLowerCase();
+  if (raw === "slack") {
+    return "slack";
+  }
+  if (raw === "discord") {
+    return "discord";
+  }
+  if (raw === "generic") {
+    return "generic";
+  }
+  return "wecom";
+}
+
+function buildNotificationPayload(
+  markdown: string,
+  format: NotificationWebhookFormat,
+): Record<string, unknown> {
+  if (format === "slack") {
+    return {
+      text: markdown,
+      mrkdwn: true,
+    };
+  }
+
+  if (format === "discord" || format === "generic") {
+    return {
+      content: markdown,
+    };
+  }
+
+  return {
+    msgtype: "markdown",
+    markdown: {
+      content: markdown,
+    },
+  };
 }
 
 interface NotificationLoggerLike {
