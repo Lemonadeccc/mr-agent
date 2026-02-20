@@ -48,6 +48,8 @@ import {
   buildAskPrompt,
   buildUserPrompt,
   getOpenAIClientFromCache,
+  normalizeAskResultForSchema,
+  normalizeReviewResultForSchema,
   openAIClientCacheKey,
   buildGeminiGenerationConfig,
   parseAnthropicJsonPayload,
@@ -415,6 +417,39 @@ test("openai-compatible fallback does not swallow auth/rate-limit/network errors
     }),
     false,
   );
+});
+
+test("review result normalizer fills required fields when model omits keys", () => {
+  const normalized = normalizeReviewResultForSchema({
+    reviews: [
+      {
+        severity: "high",
+        newPath: "src/app.ts",
+        oldPath: "src/app.ts",
+        type: "new",
+        startLine: 10,
+        endLine: 10,
+        issueHeader: "Null check",
+        issueContent: "Add a null guard before dereference.",
+      },
+    ],
+  });
+
+  assert.equal(typeof normalized.summary, "string");
+  assert.equal(normalized.summary.length > 0, true);
+  assert.equal(normalized.riskLevel, "high");
+  assert.deepEqual(normalized.positives, []);
+  assert.deepEqual(normalized.actionItems, []);
+  assert.equal(normalized.reviews.length, 1);
+});
+
+test("ask result normalizer returns fallback answer when model omits answer key", () => {
+  const normalized = normalizeAskResultForSchema({
+    note: "missing answer",
+  });
+
+  assert.equal(typeof normalized.answer, "string");
+  assert.equal(normalized.answer.length > 0, true);
 });
 
 test("managed command comment key is deterministic and seed-sensitive", () => {

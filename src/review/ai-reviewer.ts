@@ -350,7 +350,9 @@ export async function analyzePullRequest(
     return analyzeWithGemini({ model, prompt });
   });
 
-  const result = reviewResultSchema.parse(parsed);
+  const result = reviewResultSchema.parse(
+    normalizeReviewResultForSchema(parsed),
+  );
   return {
     ...result,
     reviews: result.reviews.map((item) => {
@@ -392,8 +394,223 @@ export async function answerPullRequestQuestion(
     return askWithGemini({ model, prompt });
   });
 
-  const result = askResultSchema.parse(parsed);
+  const result = askResultSchema.parse(normalizeAskResultForSchema(parsed));
   return result.answer.trim();
+}
+
+export function normalizeReviewResultForSchema(parsed: unknown): {
+  summary: string;
+  riskLevel: "low" | "medium" | "high";
+  reviews: Array<{
+    severity: "low" | "medium" | "high";
+    newPath: string;
+    oldPath: string;
+    type: "old" | "new";
+    startLine: number;
+    endLine: number;
+    issueHeader: string;
+    issueContent: string;
+    suggestion?: string;
+  }>;
+  positives: string[];
+  actionItems: string[];
+} {
+  const root = asRecord(parsed) ?? {};
+  const reviews = normalizeReviewIssues(root.reviews).slice(0, 30);
+  const riskLevel =
+    normalizeRiskLevel(root.riskLevel) ?? inferRiskLevelFromReviews(reviews);
+  const summary =
+    readNonEmptyString(root.summary) ??
+    (reviews.length > 0
+      ? `Detected ${reviews.length} potential issue(s) in changed lines.`
+      : "No significant issues detected in changed lines.");
+
+  return {
+    summary,
+    riskLevel,
+    reviews,
+    positives: normalizeStringArray(root.positives).slice(0, 10),
+    actionItems: normalizeStringArray(root.actionItems).slice(0, 10),
+  };
+}
+
+export function normalizeAskResultForSchema(parsed: unknown): {
+  answer: string;
+} {
+  if (typeof parsed === "string") {
+    const direct = parsed.trim();
+    if (direct) {
+      return { answer: direct };
+    }
+  }
+
+  const root = asRecord(parsed) ?? {};
+  const answer =
+    readNonEmptyString(root.answer) ??
+    readNonEmptyString(root.summary) ??
+    "Model did not return a structured answer. Please try again.";
+
+  return { answer };
+}
+
+function normalizeReviewIssues(value: unknown): Array<{
+  severity: "low" | "medium" | "high";
+  newPath: string;
+  oldPath: string;
+  type: "old" | "new";
+  startLine: number;
+  endLine: number;
+  issueHeader: string;
+  issueContent: string;
+  suggestion?: string;
+}> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const result: Array<{
+    severity: "low" | "medium" | "high";
+    newPath: string;
+    oldPath: string;
+    type: "old" | "new";
+    startLine: number;
+    endLine: number;
+    issueHeader: string;
+    issueContent: string;
+    suggestion?: string;
+  }> = [];
+
+  for (const item of value) {
+    const normalized = normalizeReviewIssue(item);
+    if (normalized) {
+      result.push(normalized);
+    }
+  }
+
+  return result;
+}
+
+function normalizeReviewIssue(value: unknown):
+  | {
+      severity: "low" | "medium" | "high";
+      newPath: string;
+      oldPath: string;
+      type: "old" | "new";
+      startLine: number;
+      endLine: number;
+      issueHeader: string;
+      issueContent: string;
+      suggestion?: string;
+    }
+  | undefined {
+  const item = asRecord(value);
+  if (!item) {
+    return undefined;
+  }
+
+  const newPath =
+    readNonEmptyString(item.newPath) ??
+    readNonEmptyString(item.oldPath) ??
+    "unknown";
+  const oldPath =
+    readNonEmptyString(item.oldPath) ??
+    readNonEmptyString(item.newPath) ??
+    newPath;
+  const type = item.type === "old" || item.type === "new" ? item.type : "new";
+  const startLine = normalizePositiveInt(item.startLine) ?? 1;
+  const endLine = normalizePositiveInt(item.endLine) ?? startLine;
+  const severity = normalizeSeverity(item.severity) ?? "medium";
+  const issueHeader = readNonEmptyString(item.issueHeader) ?? "Potential issue";
+  const issueContent =
+    readNonEmptyString(item.issueContent) ??
+    "Please review this change for potential issues.";
+  const suggestion = readNonEmptyString(item.suggestion);
+
+  return {
+    severity,
+    newPath,
+    oldPath,
+    type,
+    startLine,
+    endLine,
+    issueHeader,
+    issueContent,
+    suggestion: suggestion ? suggestion.slice(0, 2000) : undefined,
+  };
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const result: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const trimmed = item.trim();
+    if (trimmed) {
+      result.push(trimmed);
+    }
+  }
+  return result;
+}
+
+function normalizeRiskLevel(value: unknown): "low" | "medium" | "high" | undefined {
+  if (value === "low" || value === "medium" || value === "high") {
+    return value;
+  }
+  return undefined;
+}
+
+function normalizeSeverity(value: unknown): "low" | "medium" | "high" | undefined {
+  if (value === "low" || value === "medium" || value === "high") {
+    return value;
+  }
+  return undefined;
+}
+
+function inferRiskLevelFromReviews(
+  reviews: Array<{ severity: "low" | "medium" | "high" }>,
+): "low" | "medium" | "high" {
+  if (reviews.some((item) => item.severity === "high")) {
+    return "high";
+  }
+  if (reviews.some((item) => item.severity === "medium")) {
+    return "medium";
+  }
+  return "low";
+}
+
+function normalizePositiveInt(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const normalized = Math.floor(value);
+    return normalized > 0 ? normalized : undefined;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      const normalized = Math.floor(parsed);
+      return normalized > 0 ? normalized : undefined;
+    }
+  }
+  return undefined;
+}
+
+function readNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
 }
 
 function buildPromptHeaderAndDescription(
