@@ -1,16 +1,34 @@
-import { Controller, Get, Headers, Post, Req } from "@nestjs/common";
+import { Controller, Get, Headers, Post, Query, Req } from "@nestjs/common";
 import type { Request } from "express";
 
 import type { GitLabWebhookBody } from "#integrations/gitlab";
-import { GitlabWebhookService } from "./gitlab.webhook.service.js";
+import {
+  GitlabWebhookService,
+  shouldRequireGitLabWebhookSecret,
+} from "./gitlab.webhook.service.js";
+import {
+  buildHealthStatus,
+  isDeepHealthQuery,
+  type HealthStatus,
+} from "../webhook/health.js";
 
 @Controller("gitlab")
 export class GitlabWebhookController {
   constructor(private readonly gitlabWebhookService: GitlabWebhookService) {}
 
   @Get("health")
-  health(): { ok: boolean; name: string; mode: string } {
-    return { ok: true, name: "mr-agent", mode: "gitlab-webhook" };
+  health(@Query("deep") deep?: string): Promise<HealthStatus> {
+    const requiresSecret = shouldRequireGitLabWebhookSecret();
+    const webhookConfigured =
+      !requiresSecret || Boolean(process.env.GITLAB_WEBHOOK_SECRET?.trim());
+    return buildHealthStatus({
+      mode: "gitlab-webhook",
+      deep: isDeepHealthQuery(deep),
+      webhook: {
+        name: "gitlab-webhook-secret",
+        configured: webhookConfigured,
+      },
+    });
   }
 
   @Post("trigger")

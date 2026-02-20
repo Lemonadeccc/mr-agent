@@ -1,6 +1,14 @@
+import {
+  clearRuntimeStateScope,
+  deleteRuntimeStateValue,
+  loadRuntimeStateValue,
+  saveRuntimeStateValue,
+} from "./runtime-state.js";
+
 const MAX_RATE_LIMIT_KEYS = 5_000;
 const MAX_RATE_LIMIT_KEY_IDLE_MS = 24 * 60 * 60 * 1_000;
 const rateLimitRecords = new Map<string, number[]>();
+const RATE_LIMIT_STATE_SCOPE = "rate-limit-records";
 
 export function normalizeRateLimitPart(
   raw: string | undefined,
@@ -22,7 +30,9 @@ export function isRateLimited(key: string, limit: number, windowMs: number): boo
   const windowStart = now - safeWindowMs;
 
   pruneStaleRateLimitRecords(now);
-  const existing = rateLimitRecords.get(key) ?? [];
+  const persisted =
+    loadRuntimeStateValue<number[]>(RATE_LIMIT_STATE_SCOPE, key, now) ?? [];
+  const existing = rateLimitRecords.get(key) ?? persisted;
   const recent = existing.filter((timestamp) => timestamp > windowStart);
 
   if (recent.length >= safeLimit) {
@@ -39,6 +49,14 @@ export function isRateLimited(key: string, limit: number, windowMs: number): boo
 function touchRateLimitRecord(key: string, timestamps: number[]): void {
   rateLimitRecords.delete(key);
   rateLimitRecords.set(key, timestamps);
+  const latest = timestamps[timestamps.length - 1] ?? Date.now();
+  saveRuntimeStateValue({
+    scope: RATE_LIMIT_STATE_SCOPE,
+    key,
+    value: timestamps,
+    expiresAt: latest + MAX_RATE_LIMIT_KEY_IDLE_MS,
+    maxEntries: MAX_RATE_LIMIT_KEYS,
+  });
 }
 
 function pruneStaleRateLimitRecords(now: number): void {
@@ -47,6 +65,7 @@ function pruneStaleRateLimitRecords(now: number): void {
     const latest = timestamps[timestamps.length - 1] ?? 0;
     if (latest <= staleCutoff) {
       rateLimitRecords.delete(key);
+      deleteRuntimeStateValue(RATE_LIMIT_STATE_SCOPE, key);
     }
   }
 }
@@ -57,12 +76,15 @@ function trimRateLimitRecords(): void {
     if (first.done) {
       break;
     }
-    rateLimitRecords.delete(first.value);
+    const key = first.value;
+    rateLimitRecords.delete(key);
+    deleteRuntimeStateValue(RATE_LIMIT_STATE_SCOPE, key);
   }
 }
 
 export function __clearRateLimitStateForTests(): void {
   rateLimitRecords.clear();
+  clearRuntimeStateScope(RATE_LIMIT_STATE_SCOPE);
 }
 
 export function __getRateLimitRecordCountForTests(): number {

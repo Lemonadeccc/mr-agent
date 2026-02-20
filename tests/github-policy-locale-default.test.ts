@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { __clearDuplicateRequestStateForTests } from "../src/core/dedupe.ts";
 import { runGitHubIssuePolicyCheck } from "../src/integrations/github/github-policy.ts";
 
 test("github policy reminder uses english by default when locale is not configured", async () => {
+  __clearDuplicateRequestStateForTests();
   const originalLocale = process.env.MR_AGENT_LOCALE;
   delete process.env.MR_AGENT_LOCALE;
 

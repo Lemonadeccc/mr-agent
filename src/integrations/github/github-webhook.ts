@@ -191,6 +191,7 @@ export async function handlePlainGitHubWebhook(params: {
         customRules: reviewBehavior.customRules,
         includeCiChecks: reviewBehavior.includeCiChecks,
         enableSecretScan: reviewBehavior.secretScanEnabled,
+        secretScanCustomPatterns: reviewBehavior.secretScanCustomPatterns,
         enableAutoLabel: reviewBehavior.autoLabelEnabled,
         throwOnError: true,
       });
@@ -235,6 +236,7 @@ export async function handlePlainGitHubWebhook(params: {
           customRules: autoReview.customRules,
           includeCiChecks: autoReview.includeCiChecks,
           enableSecretScan: autoReview.secretScanEnabled,
+          secretScanCustomPatterns: autoReview.secretScanCustomPatterns,
           enableAutoLabel: autoReview.autoLabelEnabled,
         });
       }
@@ -691,6 +693,7 @@ export async function handleGitHubIssueCommentCommand(params: {
       ],
       includeCiChecks: reviewBehavior.includeCiChecks,
       enableSecretScan: reviewBehavior.secretScanEnabled,
+      secretScanCustomPatterns: reviewBehavior.secretScanCustomPatterns,
       enableAutoLabel: false,
       throwOnError,
     });
@@ -799,6 +802,7 @@ export async function handleGitHubIssueCommentCommand(params: {
     customRules: reviewBehavior.customRules,
     includeCiChecks: reviewBehavior.includeCiChecks,
     enableSecretScan: reviewBehavior.secretScanEnabled,
+    secretScanCustomPatterns: reviewBehavior.secretScanCustomPatterns,
     enableAutoLabel: reviewBehavior.autoLabelEnabled,
     throwOnError,
   });

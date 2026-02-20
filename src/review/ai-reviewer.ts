@@ -7,8 +7,8 @@ import type {
   PullRequestReviewResult,
 } from "./review-types.js";
 import { isProcessTemplateFile } from "./review-policy.js";
-import type { AskConversationTurn } from "#core";
-import { fetchWithRetry, readNumberEnv } from "#core";
+import type { AskConversationTurn, UiLocale } from "#core";
+import { fetchWithRetry, readNumberEnv, resolveUiLocale } from "#core";
 
 type AIProvider = "openai" | "openai-compatible" | "anthropic" | "gemini";
 
@@ -22,9 +22,11 @@ interface OpenAIClientCacheConfig {
 const openAIClientCache = new Map<string, OpenAI>();
 const DEFAULT_MAX_OPENAI_CLIENT_CACHE_ENTRIES = 200;
 const DEFAULT_AI_MAX_CONCURRENCY = 4;
+const DEFAULT_AI_SHUTDOWN_DRAIN_TIMEOUT_MS = 15_000;
 
 let activeAiRequests = 0;
 const aiConcurrencyWaitQueue: Array<() => void> = [];
+let aiShutdownRequested = false;
 
 const reviewIssueSchema = z.object({
   severity: z.enum(["low", "medium", "high"]),
@@ -112,7 +114,7 @@ const askResultJsonSchema = {
   },
 } as const;
 
-const SYSTEM_PROMPT = [
+const REVIEW_SYSTEM_PROMPT_ZH = [
   "你是资深代码评审工程师。",
   "你需要对 PR/MR 进行严格代码评审，输出可执行问题列表。",
   "重点关注：逻辑错误、异常处理、安全风险、并发与幂等、性能、可维护性、测试缺失。",
@@ -127,7 +129,22 @@ const SYSTEM_PROMPT = [
   "输出必须是 JSON 对象，不要 markdown 代码块。",
 ].join("\n");
 
-const ASK_SYSTEM_PROMPT = [
+const REVIEW_SYSTEM_PROMPT_EN = [
+  "You are a senior code review engineer.",
+  "You must perform strict PR/MR review and output actionable findings.",
+  "Focus on: logic defects, error handling, security, concurrency/idempotency, performance, maintainability, and missing tests.",
+  "Besides code, evaluate PR/MR process quality: description completeness, template compliance, and collaboration flow.",
+  "When changes touch workflow/process files (.github templates, workflow, CODEOWNERS, CONTRIBUTING), provide process-focused feedback.",
+  "Line numbers in reviews must map to real diff evidence; skip uncertain findings.",
+  "Keep issueHeader concise (recommended <= 12 words), and issueContent must contain a concrete fix direction.",
+  "Only provide suggestion when a direct replacement snippet is clear (code only, no markdown wrappers).",
+  "If Team custom review rules are provided, enforce them and reflect results in the conclusion.",
+  "If feedback signals are provided, adapt recommendations to historical preferences and reduce repeated low-value findings.",
+  "If CI checks are provided, include targeted fix advice for failed checks.",
+  "Output must be a JSON object; do not use markdown code fences.",
+].join("\n");
+
+const ASK_SYSTEM_PROMPT_ZH = [
   "你是资深代码评审助手。",
   "用户会基于同一个 PR/MR 的 diff 提问，请给出准确、可执行、可验证的回答。",
   "回答要先给结论，再给证据（文件/行号/代码片段线索）。",
@@ -135,6 +152,27 @@ const ASK_SYSTEM_PROMPT = [
   "若信息不足以得出结论，请明确说不确定并指出还缺什么。",
   "输出必须是 JSON 对象，格式为 {\"answer\":\"...\"}，不要 markdown 代码块。",
 ].join("\n");
+
+const ASK_SYSTEM_PROMPT_EN = [
+  "You are a senior code review assistant.",
+  "The user asks questions based on one PR/MR diff. Provide precise, actionable, and verifiable answers.",
+  "Answer with conclusion first, then evidence (file/line/snippet clues).",
+  "If feedback signals are provided, prioritize those historical preferences.",
+  "If evidence is insufficient, clearly state uncertainty and what is missing.",
+  "Output must be a JSON object in format {\"answer\":\"...\"} with no markdown code fences.",
+].join("\n");
+
+export function resolveReviewSystemPrompt(
+  locale: UiLocale = resolveUiLocale(),
+): string {
+  return locale === "en" ? REVIEW_SYSTEM_PROMPT_EN : REVIEW_SYSTEM_PROMPT_ZH;
+}
+
+export function resolveAskSystemPrompt(
+  locale: UiLocale = resolveUiLocale(),
+): string {
+  return locale === "en" ? ASK_SYSTEM_PROMPT_EN : ASK_SYSTEM_PROMPT_ZH;
+}
 
 export function openAIClientCacheKey(params: OpenAIClientCacheConfig): string {
   return [
@@ -149,6 +187,9 @@ export function getOpenAIClientFromCache(params: OpenAIClientCacheConfig): OpenA
   const key = openAIClientCacheKey(params);
   const cached = openAIClientCache.get(key);
   if (cached) {
+    openAIClientCache.delete(key);
+    openAIClientCache.set(key, cached);
+    trimOpenAIClientCache();
     return cached;
   }
 
@@ -178,6 +219,7 @@ export function __clearOpenAIClientCacheForTests(): void {
 export function __resetAiConcurrencyForTests(): void {
   activeAiRequests = 0;
   aiConcurrencyWaitQueue.length = 0;
+  aiShutdownRequested = false;
 }
 
 export function __withAiConcurrencyLimitForTests<T>(
@@ -212,25 +254,29 @@ function resolveAiMaxConcurrency(): number {
 }
 
 async function acquireAiConcurrencySlot(): Promise<void> {
-  const limit = resolveAiMaxConcurrency();
-  if (activeAiRequests < limit) {
-    activeAiRequests += 1;
-    return;
+  if (aiShutdownRequested) {
+    throw new Error("AI reviewer is shutting down");
   }
 
-  await new Promise<void>((resolve) => {
-    aiConcurrencyWaitQueue.push(resolve);
-  });
+  const limit = resolveAiMaxConcurrency();
+  while (activeAiRequests >= limit) {
+    await new Promise<void>((resolve) => {
+      aiConcurrencyWaitQueue.push(resolve);
+    });
+    if (aiShutdownRequested) {
+      throw new Error("AI reviewer is shutting down");
+    }
+  }
+
+  activeAiRequests += 1;
 }
 
 function releaseAiConcurrencySlot(): void {
+  activeAiRequests = Math.max(0, activeAiRequests - 1);
   const next = aiConcurrencyWaitQueue.shift();
   if (next) {
     next();
-    return;
   }
-
-  activeAiRequests = Math.max(0, activeAiRequests - 1);
 }
 
 async function withAiConcurrencyLimit<T>(task: () => Promise<T>): Promise<T> {
@@ -240,6 +286,34 @@ async function withAiConcurrencyLimit<T>(task: () => Promise<T>): Promise<T> {
   } finally {
     releaseAiConcurrencySlot();
   }
+}
+
+export function beginAiShutdown(): void {
+  aiShutdownRequested = true;
+  while (aiConcurrencyWaitQueue.length > 0) {
+    const waiter = aiConcurrencyWaitQueue.shift();
+    waiter?.();
+  }
+}
+
+export async function drainAiRequests(
+  timeoutMs = readNumberEnv(
+    "AI_SHUTDOWN_DRAIN_TIMEOUT_MS",
+    DEFAULT_AI_SHUTDOWN_DRAIN_TIMEOUT_MS,
+  ),
+): Promise<boolean> {
+  beginAiShutdown();
+  const deadline = Date.now() + Math.max(1, timeoutMs);
+  while (activeAiRequests > 0 && Date.now() < deadline) {
+    await sleep(50);
+  }
+  return activeAiRequests === 0;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 export async function analyzePullRequest(
@@ -556,6 +630,7 @@ async function analyzeWithOpenAI(params: {
   model: string;
   prompt: string;
 }): Promise<unknown> {
+  const systemPrompt = resolveReviewSystemPrompt();
   const apiKey =
     params.provider === "openai-compatible"
       ? (process.env.OPENAI_COMPATIBLE_API_KEY ?? process.env.OPENAI_API_KEY)
@@ -592,7 +667,7 @@ async function analyzeWithOpenAI(params: {
       messages: [
         {
           role: "system",
-          content: SYSTEM_PROMPT,
+          content: systemPrompt,
         },
         {
           role: "user",
@@ -626,7 +701,7 @@ async function analyzeWithOpenAI(params: {
       messages: [
         {
           role: "system",
-          content: SYSTEM_PROMPT,
+          content: systemPrompt,
         },
         {
           role: "user",
@@ -651,7 +726,7 @@ async function analyzeWithAnthropic(params: {
   return callAnthropicJson({
     model: params.model,
     prompt: params.prompt,
-    systemPrompt: SYSTEM_PROMPT,
+    systemPrompt: resolveReviewSystemPrompt(),
     responseSchema: reviewResultJsonSchema,
   });
 }
@@ -663,7 +738,7 @@ async function analyzeWithGemini(params: {
   return callGeminiJson({
     model: params.model,
     prompt: params.prompt,
-    systemPrompt: SYSTEM_PROMPT,
+    systemPrompt: resolveReviewSystemPrompt(),
     responseSchema: reviewResultJsonSchema,
   });
 }
@@ -673,6 +748,7 @@ async function askWithOpenAI(params: {
   model: string;
   prompt: string;
 }): Promise<unknown> {
+  const systemPrompt = resolveAskSystemPrompt();
   const apiKey =
     params.provider === "openai-compatible"
       ? (process.env.OPENAI_COMPATIBLE_API_KEY ?? process.env.OPENAI_API_KEY)
@@ -709,7 +785,7 @@ async function askWithOpenAI(params: {
       messages: [
         {
           role: "system",
-          content: ASK_SYSTEM_PROMPT,
+          content: systemPrompt,
         },
         {
           role: "user",
@@ -743,7 +819,7 @@ async function askWithOpenAI(params: {
       messages: [
         {
           role: "system",
-          content: ASK_SYSTEM_PROMPT,
+          content: systemPrompt,
         },
         {
           role: "user",
@@ -832,7 +908,7 @@ async function askWithAnthropic(params: {
   return callAnthropicJson({
     model: params.model,
     prompt: params.prompt,
-    systemPrompt: ASK_SYSTEM_PROMPT,
+    systemPrompt: resolveAskSystemPrompt(),
     responseSchema: askResultJsonSchema,
   });
 }
@@ -844,9 +920,138 @@ async function askWithGemini(params: {
   return callGeminiJson({
     model: params.model,
     prompt: params.prompt,
-    systemPrompt: ASK_SYSTEM_PROMPT,
+    systemPrompt: resolveAskSystemPrompt(),
     responseSchema: askResultJsonSchema,
   });
+}
+
+export interface AiProviderProbeResult {
+  ok: boolean;
+  provider: AIProvider;
+  model: string;
+  status: number;
+  latencyMs: number;
+  error?: string;
+}
+
+export async function probeAiProviderConnectivity(params?: {
+  timeoutMs?: number;
+}): Promise<AiProviderProbeResult> {
+  const provider = resolveProvider();
+  const model = resolveModel(provider);
+  const startedAt = Date.now();
+  const timeoutMs = Math.max(
+    500,
+    params?.timeoutMs ?? readNumberEnv("HEALTHCHECK_AI_TIMEOUT_MS", 5_000),
+  );
+
+  try {
+    const status = await probeProviderRequest(provider, model, timeoutMs);
+    return {
+      ok: status >= 200 && status < 300,
+      provider,
+      model,
+      status,
+      latencyMs: Date.now() - startedAt,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      provider,
+      model,
+      status: 0,
+      latencyMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function probeProviderRequest(
+  provider: AIProvider,
+  model: string,
+  timeoutMs: number,
+): Promise<number> {
+  if (provider === "openai" || provider === "openai-compatible") {
+    const apiKey =
+      provider === "openai-compatible"
+        ? (process.env.OPENAI_COMPATIBLE_API_KEY ?? process.env.OPENAI_API_KEY)
+        : process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new Error(
+        provider === "openai-compatible"
+          ? "Missing OPENAI_COMPATIBLE_API_KEY (or OPENAI_API_KEY)"
+          : "Missing OPENAI_API_KEY",
+      );
+    }
+    const baseUrl =
+      provider === "openai-compatible"
+        ? (process.env.OPENAI_BASE_URL?.trim() ?? "")
+        : "https://api.openai.com/v1";
+    if (!baseUrl) {
+      throw new Error("Missing OPENAI_BASE_URL for AI_PROVIDER=openai-compatible");
+    }
+    const response = await fetchWithRetry(
+      `${baseUrl.replace(/\/$/, "")}/models`,
+      {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+        },
+      },
+      {
+        timeoutMs,
+        retries: 0,
+        backoffMs: 0,
+      },
+    );
+    return response.status;
+  }
+
+  if (provider === "anthropic") {
+    const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+    if (!apiKey) {
+      throw new Error("Missing ANTHROPIC_API_KEY");
+    }
+    const response = await fetchWithRetry(
+      "https://api.anthropic.com/v1/messages",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 1,
+          messages: [{ role: "user", content: "health-check" }],
+        }),
+      },
+      {
+        timeoutMs,
+        retries: 0,
+        backoffMs: 0,
+      },
+    );
+    return response.status;
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error("Missing GEMINI_API_KEY");
+  }
+  const response = await fetchWithRetry(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: "GET",
+    },
+    {
+      timeoutMs,
+      retries: 0,
+      backoffMs: 0,
+    },
+  );
+  return response.status;
 }
 
 async function callAnthropicJson(params: {

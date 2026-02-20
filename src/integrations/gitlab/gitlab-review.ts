@@ -1,12 +1,14 @@
 import {
   BadWebhookRequestError,
   clearDuplicateRecord,
+  compileCustomSecretPatterns,
   ensureError,
   fetchWithRetry,
   fnv1a32Hex,
   getFreshCacheValue,
   isDuplicateRequest,
   isRateLimited,
+  loadRuntimeStateValue,
   loadAskConversationTurns,
   localizeText,
   normalizeRateLimitPart,
@@ -14,6 +16,7 @@ import {
   readNumberEnv,
   rememberAskConversationTurn,
   resolveUiLocale,
+  saveRuntimeStateValue,
   trimCache,
   type ExpiringCacheEntry,
 } from "#core";
@@ -71,6 +74,8 @@ const MAX_FEEDBACK_SIGNALS = 80;
 const MAX_FEEDBACK_CACHE_ENTRIES = 1_000;
 const MANAGED_NOTE_SCAN_PER_PAGE = 100;
 const MAX_MANAGED_NOTE_SCAN_PAGES = 20;
+const GITLAB_INCREMENTAL_STATE_SCOPE = "gitlab-incremental-head";
+const GITLAB_FEEDBACK_SIGNAL_SCOPE = "gitlab-feedback-signals";
 
 type ProcessGuideline = { path: string; content: string };
 type SecretFinding = {
@@ -278,6 +283,7 @@ interface GitLabReviewRunParams {
   customRules?: string[];
   includeCiChecks?: boolean;
   enableSecretScan?: boolean;
+  secretScanCustomPatterns?: string[];
   enableAutoLabel?: boolean;
   throwOnError?: boolean;
 }
@@ -332,6 +338,7 @@ interface GitLabReviewPolicy {
   checksCommandEnabled: boolean;
   includeCiChecks: boolean;
   secretScanEnabled: boolean;
+  secretScanCustomPatterns: string[];
   autoLabelEnabled: boolean;
   askCommandEnabled: boolean;
   generateTestsCommandEnabled: boolean;
@@ -352,6 +359,7 @@ const defaultGitLabReviewPolicy: GitLabReviewPolicy = {
   checksCommandEnabled: true,
   includeCiChecks: true,
   secretScanEnabled: true,
+  secretScanCustomPatterns: [],
   autoLabelEnabled: true,
   askCommandEnabled: true,
   generateTestsCommandEnabled: true,
@@ -644,6 +652,7 @@ export async function runGitLabWebhook(params: {
       customRules: policy.customRules,
       includeCiChecks: policy.includeCiChecks,
       enableSecretScan: policy.secretScanEnabled,
+      secretScanCustomPatterns: policy.secretScanCustomPatterns,
       enableAutoLabel: policy.autoLabelEnabled,
     });
   }
@@ -668,6 +677,7 @@ export async function runGitLabReview(
     customRules = [],
     includeCiChecks = true,
     enableSecretScan = true,
+    secretScanCustomPatterns = [],
     enableAutoLabel = true,
     throwOnError = false,
   } = params;
@@ -820,7 +830,10 @@ export async function runGitLabReview(
     }
 
     if (enableSecretScan) {
-      const findings = findPotentialSecrets(collected.files);
+      const findings = findPotentialSecrets(
+        collected.files,
+        secretScanCustomPatterns,
+      );
       if (findings.length > 0) {
         const warning = buildGitLabSecretWarningComment(findings, locale);
         await publishGitLabGeneralComment(gitlabToken, collected, warning);
@@ -944,15 +957,26 @@ export function recordGitLabFeedbackSignal(params: {
     DEFAULT_FEEDBACK_SIGNAL_TTL_MS,
   );
   pruneExpiredCache(feedbackSignalCache, now);
-  const current = getFreshCacheValue(feedbackSignalCache, key, now) ?? [];
+  const current =
+    getFreshCacheValue(feedbackSignalCache, key, now) ??
+    loadRuntimeStateValue<string[]>(GITLAB_FEEDBACK_SIGNAL_SCOPE, key, now) ??
+    [];
+  const nextSignals = [signal, ...current.filter((item) => item !== signal)].slice(
+    0,
+    MAX_FEEDBACK_SIGNALS,
+  );
   feedbackSignalCache.set(key, {
-    value: [signal, ...current.filter((item) => item !== signal)].slice(
-      0,
-      MAX_FEEDBACK_SIGNALS,
-    ),
+    value: nextSignals,
     expiresAt: now + ttlMs,
   });
   trimCache(feedbackSignalCache, MAX_FEEDBACK_CACHE_ENTRIES);
+  saveRuntimeStateValue({
+    scope: GITLAB_FEEDBACK_SIGNAL_SCOPE,
+    key,
+    value: nextSignals,
+    expiresAt: now + ttlMs,
+    maxEntries: MAX_FEEDBACK_CACHE_ENTRIES,
+  });
 }
 
 async function handleGitLabNoteWebhook(params: {
@@ -1343,6 +1367,7 @@ async function handleGitLabNoteWebhook(params: {
       customRules: [...policy.customRules, buildGitLabImproveRule(improveCommand.focus)],
       includeCiChecks: policy.includeCiChecks,
       enableSecretScan: policy.secretScanEnabled,
+      secretScanCustomPatterns: policy.secretScanCustomPatterns,
       enableAutoLabel: false,
     });
     return { ok: true, message: "improve command triggered" };
@@ -1478,6 +1503,7 @@ async function handleGitLabNoteWebhook(params: {
     customRules: policy.customRules,
     includeCiChecks: policy.includeCiChecks,
     enableSecretScan: policy.secretScanEnabled,
+    secretScanCustomPatterns: policy.secretScanCustomPatterns,
     enableAutoLabel: policy.autoLabelEnabled,
   });
   return { ok: true, message: "note review triggered" };
@@ -2526,28 +2552,41 @@ function shouldUseIncrementalReview(trigger: GitLabReviewTrigger): boolean {
 function getIncrementalHead(reviewMrKey: string): string | undefined {
   const now = Date.now();
   pruneExpiredCache(incrementalHeadCache, now);
-  return getFreshCacheValue(incrementalHeadCache, reviewMrKey, now);
+  return (
+    getFreshCacheValue(incrementalHeadCache, reviewMrKey, now) ??
+    loadRuntimeStateValue<string>(GITLAB_INCREMENTAL_STATE_SCOPE, reviewMrKey, now)
+  );
 }
 
 function rememberIncrementalHead(reviewMrKey: string, headSha: string): void {
   const now = Date.now();
+  const ttlMs = readNumberEnv(
+    "GITLAB_INCREMENTAL_STATE_TTL_MS",
+    DEFAULT_INCREMENTAL_STATE_TTL_MS,
+  );
   incrementalHeadCache.set(reviewMrKey, {
-    expiresAt:
-      now +
-      readNumberEnv(
-        "GITLAB_INCREMENTAL_STATE_TTL_MS",
-        DEFAULT_INCREMENTAL_STATE_TTL_MS,
-      ),
+    expiresAt: now + ttlMs,
     value: headSha,
   });
   trimCache(incrementalHeadCache, MAX_INCREMENTAL_STATE_ENTRIES);
+  saveRuntimeStateValue({
+    scope: GITLAB_INCREMENTAL_STATE_SCOPE,
+    key: reviewMrKey,
+    value: headSha,
+    expiresAt: now + ttlMs,
+    maxEntries: MAX_INCREMENTAL_STATE_ENTRIES,
+  });
 }
 
 function loadGitLabFeedbackSignals(projectId: number): string[] {
   const key = `${projectId}`;
   const now = Date.now();
   pruneExpiredCache(feedbackSignalCache, now);
-  return getFreshCacheValue(feedbackSignalCache, key, now) ?? [];
+  return (
+    getFreshCacheValue(feedbackSignalCache, key, now) ??
+    loadRuntimeStateValue<string[]>(GITLAB_FEEDBACK_SIGNAL_SCOPE, key, now) ??
+    []
+  );
 }
 
 async function resolveGitLabReviewPolicy(params: {
@@ -2580,7 +2619,15 @@ async function resolveGitLabReviewPolicy(params: {
       path: ".mr-agent.yaml",
     }));
 
-  const resolved = raw ? parseGitLabReviewPolicyConfig(raw) : defaultGitLabReviewPolicy;
+  const resolved = raw
+    ? parseGitLabReviewPolicyConfig(raw)
+    : {
+        ...defaultGitLabReviewPolicy,
+        customRules: [...defaultGitLabReviewPolicy.customRules],
+        secretScanCustomPatterns: [
+          ...defaultGitLabReviewPolicy.secretScanCustomPatterns,
+        ],
+      };
   gitlabPolicyCache.set(cacheKey, {
     value: resolved,
     expiresAt:
@@ -2599,12 +2646,15 @@ export function parseGitLabReviewPolicyConfig(raw: string): GitLabReviewPolicy {
   const policy: GitLabReviewPolicy = {
     ...defaultGitLabReviewPolicy,
     customRules: [...defaultGitLabReviewPolicy.customRules],
+    secretScanCustomPatterns: [...defaultGitLabReviewPolicy.secretScanCustomPatterns],
   };
   const lines = raw.split(/\r?\n/);
   let inReview = false;
   let reviewIndent = 0;
   let readingRules = false;
   let rulesIndent = 0;
+  let readingSecretPatterns = false;
+  let secretPatternsIndent = 0;
 
   for (const originalLine of lines) {
     const line = stripInlineYamlComment(originalLine);
@@ -2625,6 +2675,7 @@ export function parseGitLabReviewPolicyConfig(raw: string): GitLabReviewPolicy {
     if (indent <= reviewIndent && !trimmed.startsWith("-")) {
       inReview = false;
       readingRules = false;
+      readingSecretPatterns = false;
       continue;
     }
 
@@ -2634,6 +2685,16 @@ export function parseGitLabReviewPolicyConfig(raw: string): GitLabReviewPolicy {
         continue;
       }
       readingRules = false;
+    }
+
+    if (readingSecretPatterns) {
+      if (indent > secretPatternsIndent && trimmed.startsWith("- ")) {
+        policy.secretScanCustomPatterns.push(
+          stripYamlQuotes(trimmed.slice(2).trim()),
+        );
+        continue;
+      }
+      readingSecretPatterns = false;
     }
 
     const pair = trimmed.match(/^([A-Za-z0-9_]+)\s*:\s*(.*)$/);
@@ -2659,6 +2720,27 @@ export function parseGitLabReviewPolicyConfig(raw: string): GitLabReviewPolicy {
           .map((item) => stripYamlQuotes(item.trim()))
           .filter(Boolean)
           .slice(0, 30);
+      }
+      continue;
+    }
+
+    if (
+      keyLower === "secretscancustompatterns" ||
+      keyLower === "secret_scan_custom_patterns"
+    ) {
+      if (!valueRaw) {
+        readingSecretPatterns = true;
+        secretPatternsIndent = indent;
+        continue;
+      }
+      if (valueRaw.startsWith("[")) {
+        policy.secretScanCustomPatterns = valueRaw
+          .replace(/^\[/, "")
+          .replace(/\]$/, "")
+          .split(",")
+          .map((item) => stripYamlQuotes(item.trim()))
+          .filter(Boolean)
+          .slice(0, 20);
       }
       continue;
     }
@@ -2772,6 +2854,10 @@ export function parseGitLabReviewPolicyConfig(raw: string): GitLabReviewPolicy {
     .map((item) => item.trim())
     .filter(Boolean)
     .slice(0, 30);
+  policy.secretScanCustomPatterns = policy.secretScanCustomPatterns
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 20);
   return policy;
 }
 
@@ -3045,12 +3131,16 @@ export function mapGitLabStatusToConclusion(statusRaw: string | undefined): stri
   return "unknown";
 }
 
-function findPotentialSecrets(files: DiffFileContext[]): SecretFinding[] {
+function findPotentialSecrets(
+  files: DiffFileContext[],
+  customPatterns: string[] = [],
+): SecretFinding[] {
   const findings: SecretFinding[] = [];
   const seen = new Set<string>();
+  const compiledCustomPatterns = compileCustomSecretPatterns(customPatterns);
   for (const file of files) {
     for (const candidate of extractAddedLines(file.patch, file.newPath)) {
-      const secret = detectSecretOnLine(candidate.text);
+      const secret = detectSecretOnLine(candidate.text, compiledCustomPatterns);
       if (!secret) {
         continue;
       }
@@ -3106,7 +3196,10 @@ function extractAddedLines(
   return items;
 }
 
-function detectSecretOnLine(line: string): { kind: string; sample: string } | undefined {
+function detectSecretOnLine(
+  line: string,
+  customPatterns: RegExp[] = [],
+): { kind: string; sample: string } | undefined {
   const patterns: Array<{ kind: string; re: RegExp }> = [
     {
       kind: "AWS Access Key",
@@ -3124,6 +3217,10 @@ function detectSecretOnLine(line: string): { kind: string; sample: string } | un
       kind: "JWT",
       re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9._-]{10,}\.[A-Za-z0-9._-]{10,}\b/,
     },
+    ...customPatterns.map((pattern, index) => ({
+      kind: `Custom Secret Pattern #${index + 1}`,
+      re: pattern,
+    })),
   ];
 
   for (const pattern of patterns) {

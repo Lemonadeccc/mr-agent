@@ -42,6 +42,7 @@ interface ReviewPolicyConfig {
   checksCommandEnabled: boolean;
   includeCiChecks: boolean;
   secretScanEnabled: boolean;
+  secretScanCustomPatterns: string[];
   autoLabelEnabled: boolean;
   askCommandEnabled: boolean;
   generateTestsCommandEnabled: boolean;
@@ -147,6 +148,7 @@ const repoPolicyReviewSchema = z
     checksCommandEnabled: z.boolean().optional(),
     includeCiChecks: z.boolean().optional(),
     secretScanEnabled: z.boolean().optional(),
+    secretScanCustomPatterns: z.array(z.string()).optional(),
     autoLabelEnabled: z.boolean().optional(),
     askCommandEnabled: z.boolean().optional(),
     generateTestsCommandEnabled: z.boolean().optional(),
@@ -192,6 +194,7 @@ const defaultPolicyConfig: RepoPolicyConfig = {
     checksCommandEnabled: true,
     includeCiChecks: true,
     secretScanEnabled: true,
+    secretScanCustomPatterns: [],
     autoLabelEnabled: true,
     askCommandEnabled: true,
     generateTestsCommandEnabled: true,
@@ -324,6 +327,7 @@ export async function resolveGitHubPullRequestAutoReviewPolicy(params: {
   customRules: string[];
   includeCiChecks: boolean;
   secretScanEnabled: boolean;
+  secretScanCustomPatterns: string[];
   autoLabelEnabled: boolean;
 }> {
   const { context } = params;
@@ -343,6 +347,7 @@ export async function resolveGitHubPullRequestAutoReviewPolicy(params: {
       customRules: review.customRules,
       includeCiChecks: review.includeCiChecks,
       secretScanEnabled: review.secretScanEnabled,
+      secretScanCustomPatterns: review.secretScanCustomPatterns,
       autoLabelEnabled: review.autoLabelEnabled,
     };
   }
@@ -354,6 +359,7 @@ export async function resolveGitHubPullRequestAutoReviewPolicy(params: {
       customRules: review.customRules,
       includeCiChecks: review.includeCiChecks,
       secretScanEnabled: review.secretScanEnabled,
+      secretScanCustomPatterns: review.secretScanCustomPatterns,
       autoLabelEnabled: review.autoLabelEnabled,
     };
   }
@@ -365,6 +371,7 @@ export async function resolveGitHubPullRequestAutoReviewPolicy(params: {
       customRules: review.customRules,
       includeCiChecks: review.includeCiChecks,
       secretScanEnabled: review.secretScanEnabled,
+      secretScanCustomPatterns: review.secretScanCustomPatterns,
       autoLabelEnabled: review.autoLabelEnabled,
     };
   }
@@ -375,6 +382,7 @@ export async function resolveGitHubPullRequestAutoReviewPolicy(params: {
     customRules: review.customRules,
     includeCiChecks: review.includeCiChecks,
     secretScanEnabled: review.secretScanEnabled,
+    secretScanCustomPatterns: review.secretScanCustomPatterns,
     autoLabelEnabled: review.autoLabelEnabled,
   };
 }
@@ -408,6 +416,7 @@ export async function resolveGitHubReviewBehaviorPolicy(params: {
   includeCiChecks: boolean;
   checksCommandEnabled: boolean;
   secretScanEnabled: boolean;
+  secretScanCustomPatterns: string[];
   autoLabelEnabled: boolean;
   askCommandEnabled: boolean;
   generateTestsCommandEnabled: boolean;
@@ -431,6 +440,7 @@ export async function resolveGitHubReviewBehaviorPolicy(params: {
     includeCiChecks: config.review.includeCiChecks,
     checksCommandEnabled: config.review.checksCommandEnabled,
     secretScanEnabled: config.review.secretScanEnabled,
+    secretScanCustomPatterns: config.review.secretScanCustomPatterns,
     autoLabelEnabled: config.review.autoLabelEnabled,
     askCommandEnabled: config.review.askCommandEnabled,
     generateTestsCommandEnabled: config.review.generateTestsCommandEnabled,
@@ -1082,6 +1092,7 @@ function normalizeRepoPolicyConfig(raw: Partial<RepoPolicyConfig>): RepoPolicyCo
       checksCommandEnabled: review.checksCommandEnabled !== false,
       includeCiChecks: review.includeCiChecks !== false,
       secretScanEnabled: review.secretScanEnabled !== false,
+      secretScanCustomPatterns: normalizeStringList(review.secretScanCustomPatterns).slice(0, 20),
       autoLabelEnabled: review.autoLabelEnabled !== false,
       askCommandEnabled: review.askCommandEnabled !== false,
       generateTestsCommandEnabled: review.generateTestsCommandEnabled !== false,
@@ -1298,6 +1309,13 @@ function normalizeYamlReviewConfig(
       const bool = coerceBoolean(rawValue);
       if (bool !== undefined) {
         target.secretScanEnabled = bool;
+      }
+      continue;
+    }
+    if (key === "secretscancustompatterns") {
+      const list = coerceStringList(rawValue);
+      if (list) {
+        target.secretScanCustomPatterns = list;
       }
       continue;
     }

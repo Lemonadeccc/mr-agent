@@ -66,6 +66,7 @@ export const app: ApplicationFunction = (probot): void => {
         customRules: autoReview.customRules,
         includeCiChecks: autoReview.includeCiChecks,
         enableSecretScan: autoReview.secretScanEnabled,
+        secretScanCustomPatterns: autoReview.secretScanCustomPatterns,
         enableAutoLabel: autoReview.autoLabelEnabled,
       });
     }
@@ -97,6 +98,7 @@ export const app: ApplicationFunction = (probot): void => {
         customRules: autoReview.customRules,
         includeCiChecks: autoReview.includeCiChecks,
         enableSecretScan: autoReview.secretScanEnabled,
+        secretScanCustomPatterns: autoReview.secretScanCustomPatterns,
         enableAutoLabel: autoReview.autoLabelEnabled,
       });
     }
@@ -128,6 +130,7 @@ export const app: ApplicationFunction = (probot): void => {
         customRules: autoReview.customRules,
         includeCiChecks: autoReview.includeCiChecks,
         enableSecretScan: autoReview.secretScanEnabled,
+        secretScanCustomPatterns: autoReview.secretScanCustomPatterns,
         enableAutoLabel: autoReview.autoLabelEnabled,
       });
     }
@@ -150,6 +153,7 @@ export const app: ApplicationFunction = (probot): void => {
       customRules: reviewBehavior.customRules,
       includeCiChecks: reviewBehavior.includeCiChecks,
       enableSecretScan: reviewBehavior.secretScanEnabled,
+      secretScanCustomPatterns: reviewBehavior.secretScanCustomPatterns,
       enableAutoLabel: reviewBehavior.autoLabelEnabled,
     });
   });

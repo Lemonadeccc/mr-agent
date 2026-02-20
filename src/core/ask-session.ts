@@ -5,6 +5,11 @@ import {
   type ExpiringCacheEntry,
 } from "./cache.js";
 import { readNumberEnv } from "./env.js";
+import {
+  clearRuntimeStateScope,
+  loadRuntimeStateValue,
+  saveRuntimeStateValue,
+} from "./runtime-state.js";
 
 export interface AskConversationTurn {
   question: string;
@@ -14,6 +19,7 @@ export interface AskConversationTurn {
 const DEFAULT_ASK_SESSION_TTL_MS = 2 * 60 * 60 * 1_000;
 const DEFAULT_ASK_SESSION_MAX_TURNS = 6;
 const DEFAULT_ASK_SESSION_MAX_ENTRIES = 2_000;
+const ASK_SESSION_STATE_SCOPE = "ask-conversation-turns";
 
 type AskConversationCacheEntry = ExpiringCacheEntry<AskConversationTurn[]>;
 
@@ -27,7 +33,10 @@ export function loadAskConversationTurns(sessionKey: string): AskConversationTur
 
   const now = Date.now();
   pruneExpiredCache(askConversationCache, now);
-  const turns = getFreshCacheValue(askConversationCache, key, now) ?? [];
+  const turns =
+    getFreshCacheValue(askConversationCache, key, now) ??
+    loadRuntimeStateValue<AskConversationTurn[]>(ASK_SESSION_STATE_SCOPE, key, now) ??
+    [];
   return turns.map((turn) => ({ ...turn }));
 }
 
@@ -61,6 +70,13 @@ export function rememberAskConversationTurn(params: {
     expiresAt: now + ttlMs,
   });
   trimCache(askConversationCache, maxEntries);
+  saveRuntimeStateValue({
+    scope: ASK_SESSION_STATE_SCOPE,
+    key,
+    value: trimmed,
+    expiresAt: now + ttlMs,
+    maxEntries,
+  });
 }
 
 function normalizeSessionKey(raw: string): string {
@@ -69,4 +85,5 @@ function normalizeSessionKey(raw: string): string {
 
 export function __clearAskConversationCacheForTests(): void {
   askConversationCache.clear();
+  clearRuntimeStateScope(ASK_SESSION_STATE_SCOPE);
 }

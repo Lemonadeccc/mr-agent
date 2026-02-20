@@ -7,12 +7,14 @@ import { HttpErrorFilter } from "./common/filters/http-error.filter.js";
 import { GithubAppModule } from "./modules/github-app/github-app.module.js";
 import { GithubModule } from "./modules/github/github.module.js";
 import { GitlabModule } from "./modules/gitlab/gitlab.module.js";
+import { ShutdownCoordinatorService } from "./modules/webhook/shutdown-coordinator.service.js";
 
 @Module({
   imports: [GithubModule, GitlabModule, GithubAppModule],
   controllers: [AppController],
   providers: [
     AppService,
+    ShutdownCoordinatorService,
     {
       provide: APP_FILTER,
       useClass: HttpErrorFilter,

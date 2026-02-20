@@ -1,7 +1,12 @@
-import { Controller, Get, Headers, Post, Req } from "@nestjs/common";
+import { Controller, Get, Headers, Post, Query, Req } from "@nestjs/common";
 import type { Request } from "express";
 
 import { GithubWebhookService } from "./github.webhook.service.js";
+import {
+  buildHealthStatus,
+  isDeepHealthQuery,
+  type HealthStatus,
+} from "../webhook/health.js";
 
 interface RawBodyRequest extends Request {
   rawBody?: Buffer | string;
@@ -12,8 +17,18 @@ export class GithubWebhookController {
   constructor(private readonly githubWebhookService: GithubWebhookService) {}
 
   @Get("health")
-  health(): { ok: boolean; name: string; mode: string } {
-    return { ok: true, name: "mr-agent", mode: "github-webhook" };
+  health(@Query("deep") deep?: string): Promise<HealthStatus> {
+    const webhookConfigured = Boolean(
+      (process.env.GITHUB_WEBHOOK_SECRET ?? process.env.WEBHOOK_SECRET)?.trim(),
+    );
+    return buildHealthStatus({
+      mode: "github-webhook",
+      deep: isDeepHealthQuery(deep),
+      webhook: {
+        name: "github-webhook-secret",
+        configured: webhookConfigured,
+      },
+    });
   }
 
   @Post("trigger")

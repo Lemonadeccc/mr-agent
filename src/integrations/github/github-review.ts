@@ -1,15 +1,19 @@
 import {
+  clearRuntimeStateScope,
   clearDuplicateRecord,
+  compileCustomSecretPatterns,
   ensureError,
   fnv1a32Hex,
   getFreshCacheValue,
   isDuplicateRequest,
+  loadRuntimeStateValue,
   loadAskConversationTurns,
   localizeText,
   pruneExpiredCache,
   readNumberEnv,
   rememberAskConversationTurn,
   resolveUiLocale,
+  saveRuntimeStateValue,
   trimCache,
   type ExpiringCacheEntry,
 } from "#core";
@@ -53,6 +57,8 @@ const MAX_FEEDBACK_SIGNALS = 80;
 const MAX_FEEDBACK_CACHE_ENTRIES = 1_000;
 const MANAGED_COMMENT_SCAN_PER_PAGE = 100;
 const MAX_MANAGED_COMMENT_SCAN_PAGES = 20;
+const GITHUB_INCREMENTAL_STATE_SCOPE = "github-incremental-head";
+const GITHUB_FEEDBACK_SIGNAL_SCOPE = "github-feedback-signals";
 const GITHUB_PULL_FILES_TRUNCATED_WARNING = {
   zh: "⚠️ 文件列表拉取达到上限（最多 20 页 * 100 = 2000 个文件），当前评审结果可能未覆盖全部变更。",
   en: "⚠️ File listing reached the hard limit (20 pages * 100 = 2000 files); this review may not cover all changed files.",
@@ -303,6 +309,7 @@ interface GitHubReviewRunParams {
   customRules?: string[];
   includeCiChecks?: boolean;
   enableSecretScan?: boolean;
+  secretScanCustomPatterns?: string[];
   enableAutoLabel?: boolean;
   throwOnError?: boolean;
 }
@@ -571,6 +578,7 @@ export async function runGitHubReview(
     customRules = [],
     includeCiChecks = true,
     enableSecretScan = true,
+    secretScanCustomPatterns = [],
     enableAutoLabel = true,
     throwOnError = false,
   } = params;
@@ -788,7 +796,10 @@ export async function runGitHubReview(
     }
 
     if (enableSecretScan) {
-      const findings = findPotentialSecrets(collected.files);
+      const findings = findPotentialSecrets(
+        collected.files,
+        secretScanCustomPatterns,
+      );
       if (findings.length > 0) {
         await publishSecretWarningComment({
           context,
@@ -1047,7 +1058,14 @@ export function recordGitHubFeedbackSignal(params: {
     DEFAULT_FEEDBACK_SIGNAL_TTL_MS,
   );
   pruneExpiredCache(feedbackSignalCache, now);
-  const currentSignals = getFreshCacheValue(feedbackSignalCache, feedbackKey, now) ?? [];
+  const currentSignals =
+    getFreshCacheValue(feedbackSignalCache, feedbackKey, now) ??
+    loadRuntimeStateValue<string[]>(
+      GITHUB_FEEDBACK_SIGNAL_SCOPE,
+      feedbackKey,
+      now,
+    ) ??
+    [];
   const nextSignals = [
     normalizedSignal,
     ...currentSignals.filter((item) => item !== normalizedSignal),
@@ -1058,6 +1076,13 @@ export function recordGitHubFeedbackSignal(params: {
     expiresAt: now + ttlMs,
   });
   trimCache(feedbackSignalCache, MAX_FEEDBACK_CACHE_ENTRIES);
+  saveRuntimeStateValue({
+    scope: GITHUB_FEEDBACK_SIGNAL_SCOPE,
+    key: feedbackKey,
+    value: nextSignals,
+    expiresAt: now + ttlMs,
+    maxEntries: MAX_FEEDBACK_CACHE_ENTRIES,
+  });
 }
 
 function resolveDedupeTtlMs(
@@ -1083,9 +1108,18 @@ function loadGitHubFeedbackSignals(
   const repositoryLevelKey = buildGitHubFeedbackSignalKey(owner, repo);
   const now = Date.now();
   pruneExpiredCache(feedbackSignalCache, now);
-  const scoped = getFreshCacheValue(feedbackSignalCache, feedbackKey, now) ?? [];
+  const scoped =
+    getFreshCacheValue(feedbackSignalCache, feedbackKey, now) ??
+    loadRuntimeStateValue<string[]>(GITHUB_FEEDBACK_SIGNAL_SCOPE, feedbackKey, now) ??
+    [];
   const repositoryLevel =
-    getFreshCacheValue(feedbackSignalCache, repositoryLevelKey, now) ?? [];
+    getFreshCacheValue(feedbackSignalCache, repositoryLevelKey, now) ??
+    loadRuntimeStateValue<string[]>(
+      GITHUB_FEEDBACK_SIGNAL_SCOPE,
+      repositoryLevelKey,
+      now,
+    ) ??
+    [];
   if (
     !Number.isInteger(pullNumber) ||
     (pullNumber as number) <= 0 ||
@@ -1127,6 +1161,7 @@ export function __readGitHubFeedbackSignalsForTests(
 
 export function __clearGitHubFeedbackSignalCacheForTests(): void {
   feedbackSignalCache.clear();
+  clearRuntimeStateScope(GITHUB_FEEDBACK_SIGNAL_SCOPE);
 }
 
 async function collectGitHubPullRequestContext(params: {
@@ -1939,29 +1974,42 @@ function shouldUseIncrementalReview(trigger: ReviewTrigger): boolean {
 function getIncrementalHead(reviewPrKey: string): string | undefined {
   const now = Date.now();
   pruneExpiredCache(incrementalHeadCache, now);
-  return getFreshCacheValue(incrementalHeadCache, reviewPrKey, now);
+  return (
+    getFreshCacheValue(incrementalHeadCache, reviewPrKey, now) ??
+    loadRuntimeStateValue<string>(GITHUB_INCREMENTAL_STATE_SCOPE, reviewPrKey, now)
+  );
 }
 
 function rememberIncrementalHead(reviewPrKey: string, headSha: string): void {
   const now = Date.now();
+  const ttlMs = readNumberEnv(
+    "GITHUB_INCREMENTAL_STATE_TTL_MS",
+    DEFAULT_INCREMENTAL_STATE_TTL_MS,
+  );
   incrementalHeadCache.set(reviewPrKey, {
-    expiresAt:
-      now +
-      readNumberEnv(
-        "GITHUB_INCREMENTAL_STATE_TTL_MS",
-        DEFAULT_INCREMENTAL_STATE_TTL_MS,
-      ),
+    expiresAt: now + ttlMs,
     value: headSha,
   });
   trimCache(incrementalHeadCache, MAX_INCREMENTAL_STATE_ENTRIES);
+  saveRuntimeStateValue({
+    scope: GITHUB_INCREMENTAL_STATE_SCOPE,
+    key: reviewPrKey,
+    value: headSha,
+    expiresAt: now + ttlMs,
+    maxEntries: MAX_INCREMENTAL_STATE_ENTRIES,
+  });
 }
 
-function findPotentialSecrets(files: DiffFileContext[]): SecretFinding[] {
+function findPotentialSecrets(
+  files: DiffFileContext[],
+  customPatterns: string[] = [],
+): SecretFinding[] {
   const findings: SecretFinding[] = [];
   const seen = new Set<string>();
+  const compiledCustomPatterns = compileCustomSecretPatterns(customPatterns);
   for (const file of files) {
     for (const candidate of extractAddedLines(file.patch, file.newPath)) {
-      const secret = detectSecretOnLine(candidate.text);
+      const secret = detectSecretOnLine(candidate.text, compiledCustomPatterns);
       if (!secret) {
         continue;
       }
@@ -2026,7 +2074,10 @@ function extractAddedLines(
   return results;
 }
 
-function detectSecretOnLine(text: string): { kind: string; sample: string } | undefined {
+function detectSecretOnLine(
+  text: string,
+  customPatterns: RegExp[] = [],
+): { kind: string; sample: string } | undefined {
   const rules: Array<{ kind: string; pattern: RegExp }> = [
     { kind: "AWS Access Key", pattern: /\bAKIA[0-9A-Z]{16}\b/ },
     {
@@ -2046,6 +2097,10 @@ function detectSecretOnLine(text: string): { kind: string; sample: string } | un
       kind: "JWT-like Token",
       pattern: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/,
     },
+    ...customPatterns.map((pattern, index) => ({
+      kind: `Custom Secret Pattern #${index + 1}`,
+      pattern,
+    })),
   ];
 
   for (const rule of rules) {
