@@ -51,7 +51,13 @@ export function isReviewTargetFile(
 }
 
 export function isCodeFile(filePath: string): boolean {
-  const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
+  const fileName = filePath.trim().split(/[\\/]/).pop() ?? "";
+  const dotIndex = fileName.lastIndexOf(".");
+  if (dotIndex <= 0 || dotIndex === fileName.length - 1) {
+    return false;
+  }
+
+  const extension = fileName.slice(dotIndex + 1).toLowerCase();
   const allowList = getCodeExtensionAllowList();
   return allowList.has(extension);
 }
