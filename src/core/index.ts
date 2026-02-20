@@ -3,6 +3,7 @@ export * from "./cache.js";
 export * from "./dedupe.js";
 export * from "./env.js";
 export * from "./errors.js";
+export * from "./fnv.js";
 export * from "./http.js";
 export * from "./i18n.js";
 export * from "./path.js";

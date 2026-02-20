@@ -3,6 +3,7 @@ import {
   clearDuplicateRecord,
   ensureError,
   fetchWithRetry,
+  fnv1a32Hex,
   isDuplicateRequest,
   isRateLimited,
   loadAskConversationTurns,
@@ -239,20 +240,6 @@ function normalizeManagedGitLabNoteKey(raw: string): string {
   return normalized || "default";
 }
 
-function hashManagedGitLabKeySeed(raw: string): string {
-  let hash = 2166136261;
-  for (let i = 0; i < raw.length; i += 1) {
-    hash ^= raw.charCodeAt(i);
-    hash +=
-      (hash << 1) +
-      (hash << 4) +
-      (hash << 7) +
-      (hash << 8) +
-      (hash << 24);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
-}
-
 export function buildGitLabManagedCommandCommentKey(
   command: string,
   seed: string,
@@ -262,7 +249,7 @@ export function buildGitLabManagedCommandCommentKey(
     "-",
   );
   const normalizedSeed = seed.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 240);
-  return `${commandKey}:${hashManagedGitLabKeySeed(normalizedSeed)}`;
+  return `${commandKey}:${fnv1a32Hex(normalizedSeed)}`;
 }
 
 function managedGitLabNoteMarker(key: ManagedGitLabNoteKey): string {

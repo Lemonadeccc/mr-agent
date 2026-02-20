@@ -1,6 +1,7 @@
 import {
   clearDuplicateRecord,
   ensureError,
+  fnv1a32Hex,
   isDuplicateRequest,
   loadAskConversationTurns,
   localizeText,
@@ -371,20 +372,6 @@ function normalizeManagedGitHubCommentKey(raw: string): string {
   return normalized || "default";
 }
 
-function hashManagedKeySeed(raw: string): string {
-  let hash = 2166136261;
-  for (let i = 0; i < raw.length; i += 1) {
-    hash ^= raw.charCodeAt(i);
-    hash +=
-      (hash << 1) +
-      (hash << 4) +
-      (hash << 7) +
-      (hash << 8) +
-      (hash << 24);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
-}
-
 export function buildManagedCommandCommentKey(
   command: string,
   seed: string,
@@ -394,7 +381,7 @@ export function buildManagedCommandCommentKey(
     "-",
   );
   const normalizedSeed = seed.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 240);
-  return `${commandKey}:${hashManagedKeySeed(normalizedSeed)}`;
+  return `${commandKey}:${fnv1a32Hex(normalizedSeed)}`;
 }
 
 function managedGitHubCommentMarker(key: ManagedGitHubCommentKey): string {
