@@ -34,7 +34,7 @@ const CHECKS_COMMAND_RE = /^\/(?:checks|ai-review\s+checks)(?:\s+([\s\S]+))?\s*$
 const GENERATE_TESTS_COMMAND_RE =
   /^\/(?:generate[_-]?tests|ai-review\s+generate[_-]?tests)(?:\s+([\s\S]+))?\s*$/i;
 const CHANGELOG_COMMAND_RE =
-  /^\/(?:changelog|ai-review\s+changelog)(?:\s+--apply)?(?:\s+([\s\S]+))?\s*$/i;
+  /^\/(?:changelog|ai-review\s+changelog)(?:\s+([\s\S]+))?\s*$/i;
 const FEEDBACK_COMMAND_RE =
   /^\/(?:feedback|ai-review\s+feedback)\s+(resolved|dismissed|up|down)(?:\s+([\s\S]+))?\s*$/i;
 
@@ -134,14 +134,28 @@ export function parseChangelogCommand(rawBody: string): {
     return { matched: false, apply: false, focus: "" };
   }
 
-  const focus = (matched[1] ?? "")
-    .replace(/\s*--apply(?:\s|$)/gi, " ")
-    .trim();
+  const args = (matched[1] ?? "").trim();
+  if (!args) {
+    return { matched: true, apply: false, focus: "" };
+  }
+
+  const focusParts: string[] = [];
+  let apply = false;
+  for (const token of args.split(/\s+/)) {
+    if (!token) {
+      continue;
+    }
+    if (/^--apply$/i.test(token)) {
+      apply = true;
+      continue;
+    }
+    focusParts.push(token);
+  }
 
   return {
     matched: true,
-    apply: /\s--apply(?:\s|$)/i.test(body),
-    focus,
+    apply,
+    focus: focusParts.join(" ").trim(),
   };
 }
 
