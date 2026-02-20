@@ -2641,6 +2641,7 @@ function getPublicErrorMessage(error: unknown): string {
     /^Unsupported AI_PROVIDER/,
     /^Model returned empty/,
     /^Model response is not valid JSON/,
+    /^Request timed out\.?/i,
   ];
 
   if (allowList.some((pattern) => pattern.test(message))) {

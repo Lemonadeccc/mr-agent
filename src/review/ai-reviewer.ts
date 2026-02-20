@@ -28,6 +28,8 @@ const openAIClientCache = new Map<string, OpenAI>();
 const DEFAULT_MAX_OPENAI_CLIENT_CACHE_ENTRIES = 200;
 const DEFAULT_AI_MAX_CONCURRENCY = 4;
 const DEFAULT_AI_SHUTDOWN_DRAIN_TIMEOUT_MS = 15_000;
+const DEFAULT_AI_HTTP_TIMEOUT_MS = 30_000;
+const DEFAULT_AI_ASK_HTTP_TIMEOUT_MS = 60_000;
 
 let activeAiRequests = 0;
 const aiConcurrencyWaitQueue: Array<() => void> = [];
@@ -378,20 +380,38 @@ export async function answerPullRequestQuestion(
 ): Promise<string> {
   const provider = resolveProvider();
   const model = resolveModel(provider);
-  const prompt = buildAskPrompt(
-    pullRequest,
-    question,
-    options?.conversation ?? [],
-  );
+  const conversation = options?.conversation ?? [];
+  const prompt = buildAskPrompt(pullRequest, question, conversation);
 
   const parsed = await withAiConcurrencyLimit(async () => {
-    if (provider === "openai" || provider === "openai-compatible") {
-      return askWithOpenAI({ provider, model, prompt });
+    try {
+      if (provider === "openai" || provider === "openai-compatible") {
+        return await askWithOpenAI({ provider, model, prompt });
+      }
+      if (provider === "anthropic") {
+        return await askWithAnthropic({ model, prompt });
+      }
+      return await askWithGemini({ model, prompt });
+    } catch (error) {
+      if (!shouldRetryAskWithCompactContext(error)) {
+        throw error;
+      }
+
+      const compactPrompt = buildAskPromptWithOptions({
+        pullRequest,
+        question,
+        conversation: [],
+        maxDiffFiles: 12,
+      });
+
+      if (provider === "openai" || provider === "openai-compatible") {
+        return askWithOpenAI({ provider, model, prompt: compactPrompt });
+      }
+      if (provider === "anthropic") {
+        return askWithAnthropic({ model, prompt: compactPrompt });
+      }
+      return askWithGemini({ model, prompt: compactPrompt });
     }
-    if (provider === "anthropic") {
-      return askWithAnthropic({ model, prompt });
-    }
-    return askWithGemini({ model, prompt });
   });
 
   const result = askResultSchema.parse(normalizeAskResultForSchema(parsed));
@@ -800,11 +820,26 @@ export function buildAskPrompt(
   question: string,
   conversation: AskConversationTurn[] = [],
 ): string {
+  return buildAskPromptWithOptions({
+    pullRequest,
+    question,
+    conversation,
+    maxDiffFiles: 40,
+  });
+}
+
+function buildAskPromptWithOptions(params: {
+  pullRequest: PullRequestReviewInput;
+  question: string;
+  conversation: AskConversationTurn[];
+  maxDiffFiles: number;
+}): string {
+  const { pullRequest, question, conversation, maxDiffFiles } = params;
   const conversationText = formatAskConversationForPrompt(conversation);
   return [
     ...buildPromptSharedSections({
       pullRequest,
-      maxDiffFiles: 40,
+      maxDiffFiles,
       includeProcessFiles: false,
     }),
     "Previous Q&A context:",
@@ -1073,7 +1108,13 @@ async function askWithOpenAI(params: {
     );
   }
 
-  const timeout = readNumberEnv("AI_HTTP_TIMEOUT_MS", 30_000);
+  const timeout = readNumberEnv(
+    "AI_ASK_HTTP_TIMEOUT_MS",
+    Math.max(
+      DEFAULT_AI_ASK_HTTP_TIMEOUT_MS,
+      readNumberEnv("AI_HTTP_TIMEOUT_MS", DEFAULT_AI_HTTP_TIMEOUT_MS),
+    ),
+  );
   const maxRetries = readNumberEnv("AI_HTTP_RETRIES", 2);
   const client = getOpenAIClientFromCache({
     apiKey,
@@ -1284,6 +1325,13 @@ async function askWithAnthropic(params: {
     prompt: params.prompt,
     systemPrompt: resolveAskSystemPrompt(),
     responseSchema: askResultJsonSchema,
+    timeoutMs: readNumberEnv(
+      "AI_ASK_HTTP_TIMEOUT_MS",
+      Math.max(
+        DEFAULT_AI_ASK_HTTP_TIMEOUT_MS,
+        readNumberEnv("AI_HTTP_TIMEOUT_MS", DEFAULT_AI_HTTP_TIMEOUT_MS),
+      ),
+    ),
   });
 }
 
@@ -1296,6 +1344,13 @@ async function askWithGemini(params: {
     prompt: params.prompt,
     systemPrompt: resolveAskSystemPrompt(),
     responseSchema: askResultJsonSchema,
+    timeoutMs: readNumberEnv(
+      "AI_ASK_HTTP_TIMEOUT_MS",
+      Math.max(
+        DEFAULT_AI_ASK_HTTP_TIMEOUT_MS,
+        readNumberEnv("AI_HTTP_TIMEOUT_MS", DEFAULT_AI_HTTP_TIMEOUT_MS),
+      ),
+    ),
   });
 }
 
@@ -1433,6 +1488,7 @@ async function callAnthropicJson(params: {
   prompt: string;
   systemPrompt: string;
   responseSchema?: Record<string, unknown>;
+  timeoutMs?: number;
 }): Promise<unknown> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -1440,7 +1496,9 @@ async function callAnthropicJson(params: {
   }
 
   const requestOptions = {
-    timeoutMs: readNumberEnv("AI_HTTP_TIMEOUT_MS", 30_000),
+    timeoutMs:
+      params.timeoutMs ??
+      readNumberEnv("AI_HTTP_TIMEOUT_MS", DEFAULT_AI_HTTP_TIMEOUT_MS),
     retries: readNumberEnv("AI_HTTP_RETRIES", 2),
     backoffMs: readNumberEnv("AI_HTTP_RETRY_BACKOFF_MS", 400),
   } as const;
@@ -1526,6 +1584,7 @@ async function callGeminiJson(params: {
   prompt: string;
   systemPrompt: string;
   responseSchema?: Record<string, unknown>;
+  timeoutMs?: number;
 }): Promise<unknown> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -1537,7 +1596,9 @@ async function callGeminiJson(params: {
   )}:generateContent`;
 
   const requestOptions = {
-    timeoutMs: readNumberEnv("AI_HTTP_TIMEOUT_MS", 30_000),
+    timeoutMs:
+      params.timeoutMs ??
+      readNumberEnv("AI_HTTP_TIMEOUT_MS", DEFAULT_AI_HTTP_TIMEOUT_MS),
     retries: readNumberEnv("AI_HTTP_RETRIES", 2),
     backoffMs: readNumberEnv("AI_HTTP_RETRY_BACKOFF_MS", 400),
   } as const;
@@ -1779,4 +1840,24 @@ function parseJsonFromModelText(text: string): unknown {
 
     throw new Error("Model response is not valid JSON");
   }
+}
+
+export function shouldRetryAskWithCompactContext(error: unknown): boolean {
+  const status = readErrorStatus(error);
+  if (status === 408 || status === 429 || status === 502 || status === 503 || status === 504) {
+    return true;
+  }
+
+  const text = collectErrorText(error).toLowerCase();
+  if (!text) {
+    return false;
+  }
+
+  return (
+    text.includes("request timed out") ||
+    text.includes("timed out") ||
+    text.includes("timeout") ||
+    text.includes("etimedout") ||
+    text.includes("deadline exceeded")
+  );
 }

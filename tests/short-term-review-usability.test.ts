@@ -55,6 +55,7 @@ import {
   isModelResponseNotJsonError,
   parseAnthropicJsonPayload,
   shouldFallbackToJsonObject,
+  shouldRetryAskWithCompactContext,
   shouldRetryAnthropicWithoutTools,
   shouldRetryGeminiWithoutSchema,
 } from "../src/review/ai-reviewer.ts";
@@ -431,6 +432,21 @@ test("model-response parse error detector only matches local parse errors", () =
   );
   assert.equal(
     isModelResponseNotJsonError(new Error("401 invalid api key")),
+    false,
+  );
+});
+
+test("ask fallback retry detector only matches timeout-like errors", () => {
+  assert.equal(
+    shouldRetryAskWithCompactContext(new Error("Request timed out.")),
+    true,
+  );
+  assert.equal(
+    shouldRetryAskWithCompactContext({ status: 504, error: { message: "gateway timeout" } }),
+    true,
+  );
+  assert.equal(
+    shouldRetryAskWithCompactContext(new Error("Model response is not valid JSON")),
     false,
   );
 });
