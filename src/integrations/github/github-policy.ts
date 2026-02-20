@@ -8,6 +8,7 @@ import {
 import type { ReviewMode } from "#review";
 import { load as loadYaml } from "js-yaml";
 import { z } from "zod";
+import { decodeGitHubFileContent } from "./github-content.js";
 import type {
   GitHubCheckRunCreateParams,
   GitHubRepositoryContentFile,
@@ -921,14 +922,6 @@ async function tryLoadRepositoryContent(params: {
   } catch {
     return undefined;
   }
-}
-
-function decodeGitHubFileContent(content: string, encoding: string | undefined): string {
-  if ((encoding ?? "").toLowerCase() === "base64") {
-    return Buffer.from(content.replace(/\n/g, ""), "base64").toString("utf8");
-  }
-
-  return content;
 }
 
 function normalizeRepoPolicyConfig(raw: Partial<RepoPolicyConfig>): RepoPolicyConfig {

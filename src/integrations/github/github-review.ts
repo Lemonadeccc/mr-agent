@@ -32,6 +32,7 @@ import type {
   ReviewMode,
   ReviewTrigger,
 } from "#review";
+import { decodeGitHubFileContent } from "./github-content.js";
 
 const MAX_FILES = 40;
 const DEFAULT_MAX_PATCH_CHARS_PER_FILE = 4_000;
@@ -2359,14 +2360,6 @@ function asContentFile(
   }
 
   return data;
-}
-
-function decodeGitHubFileContent(content: string, encoding: string | undefined): string {
-  if ((encoding ?? "").toLowerCase() === "base64") {
-    return Buffer.from(content.replace(/\n/g, ""), "base64").toString("utf8");
-  }
-
-  return content;
 }
 
 export function buildGitHubChangelogQuestion(
