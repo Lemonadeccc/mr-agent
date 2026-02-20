@@ -453,6 +453,30 @@ export function normalizeAskResultForSchema(parsed: unknown): {
   return { answer };
 }
 
+function buildReviewFallbackFromNonJsonText(text: string): {
+  summary: string;
+  riskLevel: "low";
+  reviews: [];
+  positives: [];
+  actionItems: [string];
+} {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const snippet = normalized.slice(0, 240);
+  const summary = snippet
+    ? `Model returned non-JSON output. Preview: ${snippet}`
+    : "Model returned non-JSON output.";
+
+  return {
+    summary,
+    riskLevel: "low",
+    reviews: [],
+    positives: [],
+    actionItems: [
+      "Model output was not structured JSON; consider using a model with stronger structured-output support.",
+    ],
+  };
+}
+
 function normalizeReviewIssues(value: unknown): Array<{
   severity: "low" | "medium" | "high";
   newPath: string;
@@ -929,7 +953,7 @@ async function analyzeWithOpenAI(params: {
   } catch (error) {
     if (
       params.provider !== "openai-compatible" ||
-      !shouldFallbackToJsonObject(error)
+      !shouldTryOpenAICompatibleFallback(error)
     ) {
       throw error;
     }
@@ -962,7 +986,7 @@ async function analyzeWithOpenAI(params: {
         extractText(completion.choices[0]?.message.content),
       );
     } catch (fallbackError) {
-      if (!shouldFallbackToJsonObject(fallbackError)) {
+      if (!shouldTryOpenAICompatibleFallback(fallbackError)) {
         throw fallbackError;
       }
 
@@ -986,9 +1010,15 @@ async function analyzeWithOpenAI(params: {
         },
       );
 
-      return parseJsonFromModelText(
-        extractText(completion.choices[0]?.message.content),
-      );
+      const text = extractText(completion.choices[0]?.message.content);
+      try {
+        return parseJsonFromModelText(text);
+      } catch (parseError) {
+        if (!isModelResponseNotJsonError(parseError)) {
+          throw parseError;
+        }
+        return buildReviewFallbackFromNonJsonText(text);
+      }
     }
   }
 }
@@ -1087,7 +1117,7 @@ async function askWithOpenAI(params: {
   } catch (error) {
     if (
       params.provider !== "openai-compatible" ||
-      !shouldFallbackToJsonObject(error)
+      !shouldTryOpenAICompatibleFallback(error)
     ) {
       throw error;
     }
@@ -1120,7 +1150,7 @@ async function askWithOpenAI(params: {
         extractText(completion.choices[0]?.message.content),
       );
     } catch (fallbackError) {
-      if (!shouldFallbackToJsonObject(fallbackError)) {
+      if (!shouldTryOpenAICompatibleFallback(fallbackError)) {
         throw fallbackError;
       }
 
@@ -1144,11 +1174,34 @@ async function askWithOpenAI(params: {
         },
       );
 
-      return parseJsonFromModelText(
-        extractText(completion.choices[0]?.message.content),
-      );
+      const text = extractText(completion.choices[0]?.message.content);
+      try {
+        return parseJsonFromModelText(text);
+      } catch (parseError) {
+        if (!isModelResponseNotJsonError(parseError)) {
+          throw parseError;
+        }
+        return { answer: text.trim() || "Model returned empty answer." };
+      }
     }
   }
+}
+
+function shouldTryOpenAICompatibleFallback(error: unknown): boolean {
+  return shouldFallbackToJsonObject(error) || isModelResponseNotJsonError(error);
+}
+
+export function isModelResponseNotJsonError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("model response is not valid json") ||
+    message.includes("model returned empty text") ||
+    message.includes("model returned empty content")
+  );
 }
 
 export function shouldFallbackToJsonObject(error: unknown): boolean {

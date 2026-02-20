@@ -52,6 +52,7 @@ import {
   normalizeReviewResultForSchema,
   openAIClientCacheKey,
   buildGeminiGenerationConfig,
+  isModelResponseNotJsonError,
   parseAnthropicJsonPayload,
   shouldFallbackToJsonObject,
   shouldRetryAnthropicWithoutTools,
@@ -415,6 +416,21 @@ test("openai-compatible fallback does not swallow auth/rate-limit/network errors
       status: 400,
       error: { message: "invalid_request_error: unrelated bad request" },
     }),
+    false,
+  );
+});
+
+test("model-response parse error detector only matches local parse errors", () => {
+  assert.equal(
+    isModelResponseNotJsonError(new Error("Model response is not valid JSON")),
+    true,
+  );
+  assert.equal(
+    isModelResponseNotJsonError(new Error("Model returned empty text")),
+    true,
+  );
+  assert.equal(
+    isModelResponseNotJsonError(new Error("401 invalid api key")),
     false,
   );
 });
