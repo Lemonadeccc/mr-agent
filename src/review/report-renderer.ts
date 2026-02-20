@@ -35,6 +35,14 @@ const GENERATE_TESTS_COMMAND_RE =
   /^\/(?:generate[_-]?tests|ai-review\s+generate[_-]?tests)(?:\s+([\s\S]+))?\s*$/i;
 const CHANGELOG_COMMAND_RE =
   /^\/(?:changelog|ai-review\s+changelog)(?:\s+([\s\S]+))?\s*$/i;
+const IMPROVE_COMMAND_RE =
+  /^\/(?:improve|ai-review\s+improve)(?:\s+([\s\S]+))?\s*$/i;
+const ADD_DOC_COMMAND_RE =
+  /^\/(?:add[_-]?doc|ai-review\s+add[_-]?doc)(?:\s+([\s\S]+))?\s*$/i;
+const REFLECT_COMMAND_RE =
+  /^\/(?:reflect|ai-review\s+reflect)(?:\s+([\s\S]+))?\s*$/i;
+const SIMILAR_ISSUE_COMMAND_RE =
+  /^\/(?:similar[_-]?issue|ai-review\s+similar[_-]?issue)(?:\s+([\s\S]+))?\s*$/i;
 const FEEDBACK_COMMAND_RE =
   /^\/(?:feedback|ai-review\s+feedback)\s+(resolved|dismissed|up|down)(?:\s+([\s\S]+))?\s*$/i;
 
@@ -120,6 +128,70 @@ export function parseGenerateTestsCommand(rawBody: string): {
   return {
     matched: true,
     focus: matched[1]?.trim() ?? "",
+  };
+}
+
+export function parseImproveCommand(rawBody: string): {
+  matched: boolean;
+  focus: string;
+} {
+  const body = rawBody.trim();
+  const matched = body.match(IMPROVE_COMMAND_RE);
+  if (!matched) {
+    return { matched: false, focus: "" };
+  }
+
+  return {
+    matched: true,
+    focus: matched[1]?.trim() ?? "",
+  };
+}
+
+export function parseAddDocCommand(rawBody: string): {
+  matched: boolean;
+  focus: string;
+} {
+  const body = rawBody.trim();
+  const matched = body.match(ADD_DOC_COMMAND_RE);
+  if (!matched) {
+    return { matched: false, focus: "" };
+  }
+
+  return {
+    matched: true,
+    focus: matched[1]?.trim() ?? "",
+  };
+}
+
+export function parseReflectCommand(rawBody: string): {
+  matched: boolean;
+  request: string;
+} {
+  const body = rawBody.trim();
+  const matched = body.match(REFLECT_COMMAND_RE);
+  if (!matched) {
+    return { matched: false, request: "" };
+  }
+
+  return {
+    matched: true,
+    request: matched[1]?.trim() ?? "",
+  };
+}
+
+export function parseSimilarIssueCommand(rawBody: string): {
+  matched: boolean;
+  query: string;
+} {
+  const body = rawBody.trim();
+  const matched = body.match(SIMILAR_ISSUE_COMMAND_RE);
+  if (!matched) {
+    return { matched: false, query: "" };
+  }
+
+  return {
+    matched: true,
+    query: matched[1]?.trim() ?? "",
   };
 }
 

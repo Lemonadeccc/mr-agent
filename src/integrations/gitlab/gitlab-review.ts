@@ -24,9 +24,11 @@ import {
   buildIssueCommentMarkdown,
   buildReportCommentMarkdown,
   countPatchChanges,
+  findSimilarIssues,
   findFileForReview,
   GITLAB_GUIDELINE_DIRECTORIES,
   GITLAB_GUIDELINE_FILE_PATHS,
+  parseAddDocCommand,
   isProcessTemplateFile,
   isReviewTargetFile,
   parseAskCommand,
@@ -35,8 +37,12 @@ import {
   parseDescribeCommand,
   parseFeedbackCommand,
   parseGenerateTestsCommand,
+  parseImproveCommand,
   parsePatchWithLineNumbers,
+  parseReflectCommand,
+  prioritizePatchHunks,
   parseReviewCommand,
+  parseSimilarIssueCommand,
   resolveReviewLineForIssue,
 } from "#review";
 import type {
@@ -1312,6 +1318,139 @@ async function handleGitLabNoteWebhook(params: {
     return { ok: true, message: "changelog command triggered" };
   }
 
+  const improveCommand = parseImproveCommand(body);
+  if (improveCommand.matched) {
+    if (
+      await shouldRejectGitLabCommandByRateLimit({
+        gitlabToken,
+        target,
+        projectId: payload.project.id,
+        mrId: mergePayload.object_attributes.iid,
+        userName: commentUserName,
+        command: "improve",
+        logger: params.logger,
+      })
+    ) {
+      return { ok: true, message: "improve command rate limited" };
+    }
+
+    await runGitLabReview({
+      payload: mergePayload,
+      headers: params.headers,
+      logger: params.logger,
+      mode: "comment",
+      trigger: "comment-command",
+      customRules: [...policy.customRules, buildGitLabImproveRule(improveCommand.focus)],
+      includeCiChecks: policy.includeCiChecks,
+      enableSecretScan: policy.secretScanEnabled,
+      enableAutoLabel: false,
+    });
+    return { ok: true, message: "improve command triggered" };
+  }
+
+  const addDocCommand = parseAddDocCommand(body);
+  if (addDocCommand.matched) {
+    if (
+      await shouldRejectGitLabCommandByRateLimit({
+        gitlabToken,
+        target,
+        projectId: payload.project.id,
+        mrId: mergePayload.object_attributes.iid,
+        userName: commentUserName,
+        command: "add-doc",
+        logger: params.logger,
+      })
+    ) {
+      return { ok: true, message: "add_doc command rate limited" };
+    }
+
+    await runGitLabReview({
+      payload: mergePayload,
+      headers: params.headers,
+      logger: params.logger,
+      mode: "comment",
+      trigger: "comment-command",
+      customRules: [...policy.customRules, buildGitLabAddDocRule(addDocCommand.focus)],
+      includeCiChecks: policy.includeCiChecks,
+      enableSecretScan: false,
+      enableAutoLabel: false,
+    });
+    return { ok: true, message: "add_doc command triggered" };
+  }
+
+  const reflectCommand = parseReflectCommand(body);
+  if (reflectCommand.matched) {
+    if (
+      await shouldRejectGitLabCommandByRateLimit({
+        gitlabToken,
+        target,
+        projectId: payload.project.id,
+        mrId: mergePayload.object_attributes.iid,
+        userName: commentUserName,
+        command: "reflect",
+        logger: params.logger,
+      })
+    ) {
+      return { ok: true, message: "reflect command rate limited" };
+    }
+    if (!policy.askCommandEnabled) {
+      await publishGitLabGeneralComment(
+        gitlabToken,
+        target,
+        localizeText(
+          {
+            zh: "`/reflect` 依赖 `/ask` 能力，但当前仓库已禁用 ask（.mr-agent.yml -> review.askCommandEnabled=false）。",
+            en: "`/reflect` depends on `/ask`, but ask is disabled for this repository (.mr-agent.yml -> review.askCommandEnabled=false).",
+          },
+          locale,
+        ),
+      );
+      return { ok: true, message: "reflect command ignored by policy" };
+    }
+
+    const reflectQuestion = buildGitLabReflectQuestion(reflectCommand.request);
+    await runGitLabAsk({
+      payload: mergePayload,
+      headers: params.headers,
+      logger: params.logger,
+      question: reflectQuestion,
+      trigger: "comment-command",
+      customRules: policy.customRules,
+      includeCiChecks: policy.includeCiChecks,
+      commentTitle: "AI Reflect",
+      displayQuestion: reflectCommand.request
+        ? `/reflect ${reflectCommand.request}`
+        : "/reflect",
+      managedCommentKey: buildGitLabManagedCommandCommentKey("reflect", reflectQuestion),
+    });
+    return { ok: true, message: "reflect command triggered" };
+  }
+
+  const similarIssueCommand = parseSimilarIssueCommand(body);
+  if (similarIssueCommand.matched) {
+    if (
+      await shouldRejectGitLabCommandByRateLimit({
+        gitlabToken,
+        target,
+        projectId: payload.project.id,
+        mrId: mergePayload.object_attributes.iid,
+        userName: commentUserName,
+        command: "similar-issue",
+        logger: params.logger,
+      })
+    ) {
+      return { ok: true, message: "similar_issue command rate limited" };
+    }
+
+    await runGitLabSimilarIssueCommand({
+      payload: mergePayload,
+      gitlabToken,
+      query: similarIssueCommand.query,
+      locale,
+    });
+    return { ok: true, message: "similar_issue command triggered" };
+  }
+
   const command = parseReviewCommand(body);
   if (!command.matched) {
     return { ok: true, message: "ignored note content" };
@@ -1886,10 +2025,10 @@ async function collectGitLabMergeRequestContext(params: {
     }
 
     const rawPatch = change.diff ?? "(binary / patch omitted)";
-    const trimmedPatch =
-      rawPatch.length > limits.maxPatchCharsPerFile
-        ? `${rawPatch.slice(0, limits.maxPatchCharsPerFile)}\n... [patch truncated]`
-        : rawPatch;
+    const trimmedPatch = prioritizePatchHunks(
+      rawPatch,
+      limits.maxPatchCharsPerFile,
+    );
 
     if (totalPatchChars + trimmedPatch.length > limits.maxTotalPatchChars) {
       break;
@@ -3222,6 +3361,159 @@ export function buildGitLabDescribeQuestion(
     "3) File Walkthrough 覆盖关键文件与改动意图；",
     "4) Test Plan 给出可执行的验证清单。",
     "输出要求：只输出 Markdown 本体，不要 JSON，不要代码块，不要额外解释。",
+  ].join("\n");
+}
+
+function buildGitLabImproveRule(focus: string): string {
+  const normalizedFocus = focus.trim();
+  if (normalizedFocus) {
+    return `Focus mode: improvement suggestions only. Prioritize high-impact fixes related to: ${normalizedFocus}. Prefer concrete code suggestions when possible.`;
+  }
+  return "Focus mode: improvement suggestions only. Prioritize high-impact fixes and include concrete code suggestions when possible.";
+}
+
+function buildGitLabAddDocRule(focus: string): string {
+  const normalizedFocus = focus.trim();
+  if (normalizedFocus) {
+    return `Focus mode: docstrings/comments only. Improve developer-facing documentation for: ${normalizedFocus}. Output only doc-related findings with concrete snippets.`;
+  }
+  return "Focus mode: docstrings/comments only. Output only documentation-related findings with concrete doc snippet suggestions.";
+}
+
+function buildGitLabReflectQuestion(request: string): string {
+  const normalizedRequest = request.trim();
+  if (normalizedRequest) {
+    return `请基于当前 MR 改动与以下目标，给出 3-5 个澄清问题，帮助作者明确需求与验收标准。目标：${normalizedRequest}。要求：每个问题一句话，按优先级排序，并附带“为什么要确认”。`;
+  }
+  return "请基于当前 MR 改动给出 3-5 个澄清问题，帮助作者明确需求与验收标准。要求：每个问题一句话，按优先级排序，并附带“为什么要确认”。";
+}
+
+async function runGitLabSimilarIssueCommand(params: {
+  payload: GitLabMrWebhookBody;
+  gitlabToken: string;
+  query: string;
+  locale: "zh" | "en";
+}): Promise<void> {
+  const target = buildGitLabCommentTargetFromPayload({
+    payload: params.payload,
+    baseUrl: process.env.GITLAB_BASE_URL,
+  });
+  const query = resolveGitLabSimilarIssueQuery(params.payload, params.query);
+  if (!query) {
+    await publishGitLabGeneralComment(
+      params.gitlabToken,
+      target,
+      localizeText(
+        {
+          zh: "无法提取用于相似 Issue 检索的查询文本，请在命令后追加关键词，例如：`/similar_issue timeout race condition`。",
+          en: "Unable to derive a search query for similar issues. Add keywords, for example: `/similar_issue timeout race condition`.",
+        },
+        params.locale,
+      ),
+    );
+    return;
+  }
+
+  const response = await fetchWithRetry(
+    `${target.baseUrl}/api/v4/projects/${encodeURIComponent(target.projectId)}/issues?state=all&order_by=updated_at&sort=desc&per_page=100`,
+    {
+      headers: {
+        "PRIVATE-TOKEN": params.gitlabToken,
+      },
+    },
+    {
+      timeoutMs: readNumberEnv("GITLAB_HTTP_TIMEOUT_MS", 30_000),
+      retries: readNumberEnv("GITLAB_HTTP_RETRIES", 2),
+      backoffMs: readNumberEnv("GITLAB_HTTP_RETRY_BACKOFF_MS", 400),
+    },
+  );
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `加载 GitLab Issues 失败 (${response.status}): ${text.slice(0, 300)}`,
+    );
+  }
+
+  const rawIssues = (await response.json()) as Array<{
+    iid?: number;
+    title?: string;
+    description?: string;
+    state?: string;
+    web_url?: string;
+  }>;
+  const candidates = rawIssues
+    .map((issue) => ({
+      id: issue.iid ?? 0,
+      title: issue.title ?? "",
+      body: issue.description ?? "",
+      url: issue.web_url ?? "",
+      state: issue.state,
+    }))
+    .filter((issue) => issue.id > 0)
+    .filter((issue) => issue.id !== params.payload.object_attributes.iid)
+    .filter((issue) => Boolean(issue.url && issue.title));
+
+  const matches = findSimilarIssues({
+    query,
+    candidates,
+    limit: 5,
+  });
+
+  await publishGitLabGeneralComment(
+    params.gitlabToken,
+    target,
+    buildGitLabSimilarIssueComment(query, matches, params.locale),
+  );
+}
+
+function resolveGitLabSimilarIssueQuery(
+  payload: GitLabMrWebhookBody,
+  query: string,
+): string {
+  const fromCommand = query.trim();
+  if (fromCommand) {
+    return fromCommand;
+  }
+
+  return [payload.object_attributes.title ?? "", payload.object_attributes.description ?? ""]
+    .join(" ")
+    .trim();
+}
+
+function buildGitLabSimilarIssueComment(
+  query: string,
+  matches: Array<{
+    id: number | string;
+    title: string;
+    url: string;
+    state?: string | null;
+    score: number;
+    matchedTerms: string[];
+  }>,
+  locale: "zh" | "en",
+): string {
+  if (matches.length === 0) {
+    return localizeText(
+      {
+        zh:
+          "## AI Similar Issue Finder\n\n未发现高相关 Issue。\n\n可尝试提供更具体关键词，例如：`/similar_issue auth token refresh race`。",
+        en:
+          "## AI Similar Issue Finder\n\nNo highly related issues found.\n\nTry more specific keywords, for example: `/similar_issue auth token refresh race`.",
+      },
+      locale,
+    );
+  }
+
+  return [
+    "## AI Similar Issue Finder",
+    "",
+    `${localizeText({ zh: "查询", en: "Query" }, locale)}: \`${query}\``,
+    "",
+    ...matches.map((item, index) => {
+      const terms = item.matchedTerms.length > 0 ? item.matchedTerms.join(", ") : "-";
+      const state = (item.state ?? "unknown").toString();
+      return `${index + 1}. [#${item.id}](${item.url}) ${item.title} (state=${state}, score=${item.score}, terms=${terms})`;
+    }),
   ].join("\n");
 }
 

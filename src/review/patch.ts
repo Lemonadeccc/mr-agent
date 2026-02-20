@@ -7,6 +7,8 @@ interface Hunk {
 }
 
 const HUNK_RE = /^@@ -(\d+),?(\d+)? \+(\d+),?(\d+)? @@/;
+const PATCH_RISK_KEYWORDS_RE =
+  /\b(auth|token|secret|password|permission|oauth|jwt|sql|query|exec|shell|decrypt|encrypt|cache|concurr|race|lock|thread|async|await|timeout|retry|error|exception|null|undefined)\b/i;
 
 export function parsePatchWithLineNumbers(rawPatch: string): {
   extendedDiff: string;
@@ -73,6 +75,68 @@ export function getDiffSnippet(
   return snippet.length > 0 ? snippet.join("\n") : "(no diff snippet available)";
 }
 
+export function prioritizePatchHunks(
+  rawPatch: string,
+  maxPatchChars: number,
+): string {
+  const safeLimit = Math.max(1, maxPatchChars);
+  if (rawPatch.length <= safeLimit) {
+    return rawPatch;
+  }
+
+  const trimmed = rawPatch.trim();
+  if (!trimmed.includes("@@")) {
+    return `${rawPatch.slice(0, safeLimit)}\n... [patch truncated]`;
+  }
+
+  const hunks = splitHunks(trimmed);
+  if (hunks.length === 0) {
+    return `${rawPatch.slice(0, safeLimit)}\n... [patch truncated]`;
+  }
+
+  const hunkEntries = hunks.map((hunk, index) => {
+    const text = hunk.lines.join("\n");
+    return {
+      index,
+      text,
+      score: scoreHunk(hunk.lines),
+    };
+  });
+
+  const picked = new Set<number>();
+  let usedChars = 0;
+
+  for (const hunk of hunkEntries
+    .slice()
+    .sort((a, b) => (b.score === a.score ? a.index - b.index : b.score - a.score))) {
+    const addition = hunk.text.length + (usedChars > 0 ? 2 : 0);
+    if (usedChars + addition > safeLimit && picked.size > 0) {
+      continue;
+    }
+    picked.add(hunk.index);
+    usedChars += addition;
+    if (usedChars >= safeLimit) {
+      break;
+    }
+  }
+
+  const result = hunkEntries
+    .filter((item) => picked.has(item.index))
+    .sort((a, b) => a.index - b.index)
+    .map((item) => item.text)
+    .join("\n");
+
+  if (!result) {
+    return `${rawPatch.slice(0, safeLimit)}\n... [patch truncated]`;
+  }
+
+  if (picked.size >= hunkEntries.length && result.length <= safeLimit) {
+    return result;
+  }
+
+  return `${result}\n... [hunks prioritized]`;
+}
+
 function splitHunks(diff: string): Hunk[] {
   const lines = diff.split("\n");
   const hunks: Hunk[] = [];
@@ -106,6 +170,26 @@ function splitHunks(diff: string): Hunk[] {
   }
 
   return hunks;
+}
+
+function scoreHunk(lines: string[]): number {
+  let score = 0;
+  for (const line of lines) {
+    if (line.startsWith("+")) {
+      score += 1;
+      if (PATCH_RISK_KEYWORDS_RE.test(line)) {
+        score += 4;
+      }
+    } else if (line.startsWith("-")) {
+      score += 1;
+      if (PATCH_RISK_KEYWORDS_RE.test(line)) {
+        score += 2;
+      }
+    } else if (line.startsWith("@@")) {
+      score += 1;
+    }
+  }
+  return score;
 }
 
 function annotateHunk(hunk: Hunk): {

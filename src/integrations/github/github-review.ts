@@ -25,6 +25,7 @@ import {
   isProcessTemplateFile,
   isReviewTargetFile,
   parsePatchWithLineNumbers,
+  prioritizePatchHunks,
   resolveReviewLineForIssue,
 } from "#review";
 import type {
@@ -94,6 +95,15 @@ export interface GitHubPullSummary {
 export interface GitHubIssueCommentSummary {
   id: number;
   body?: string | null;
+}
+
+export interface GitHubIssueSummary {
+  number: number;
+  title?: string | null;
+  body?: string | null;
+  state?: string | null;
+  html_url?: string | null;
+  pull_request?: unknown;
 }
 
 export interface GitHubPullFile {
@@ -221,6 +231,16 @@ export interface MinimalGitHubOctokit {
     }): Promise<unknown>;
   };
   issues: {
+    listForRepo?(params: {
+      [key: string]: unknown;
+      owner: string;
+      repo: string;
+      state?: "open" | "closed" | "all";
+      sort?: "created" | "updated" | "comments";
+      direction?: "asc" | "desc";
+      per_page?: number;
+      page?: number;
+    }): Promise<{ data: GitHubIssueSummary[] }>;
     listComments?(params: {
       owner: string;
       repo: string;
@@ -1186,10 +1206,10 @@ async function collectGitHubPullRequestContext(params: {
     }
 
     const rawPatch = file.patch ?? "(binary / patch omitted)";
-    const trimmedPatch =
-      rawPatch.length > limits.maxPatchCharsPerFile
-        ? `${rawPatch.slice(0, limits.maxPatchCharsPerFile)}\n... [patch truncated]`
-        : rawPatch;
+    const trimmedPatch = prioritizePatchHunks(
+      rawPatch,
+      limits.maxPatchCharsPerFile,
+    );
 
     if (totalPatchChars + trimmedPatch.length > limits.maxTotalPatchChars) {
       break;

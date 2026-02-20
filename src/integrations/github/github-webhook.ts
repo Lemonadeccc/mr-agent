@@ -24,6 +24,7 @@ import {
   runGitHubDescribe,
   runGitHubReview,
   type GitHubCheckRunSummary,
+  type GitHubIssueSummary,
   type GitHubPullFile,
   type GitHubPullSummary,
   type GitHubReviewContext,
@@ -37,13 +38,18 @@ import {
   runGitHubPullRequestPolicyCheck,
 } from "./github-policy.js";
 import {
+  findSimilarIssues,
+  parseAddDocCommand,
   parseAskCommand,
   parseChangelogCommand,
   parseChecksCommand,
   parseDescribeCommand,
   parseFeedbackCommand,
   parseGenerateTestsCommand,
+  parseImproveCommand,
+  parseReflectCommand,
   parseReviewCommand,
+  parseSimilarIssueCommand,
 } from "#review";
 
 const COMMAND = "/ai-review";
@@ -668,6 +674,109 @@ export async function handleGitHubIssueCommentCommand(params: {
     return { ok: true, message: "changelog command triggered" };
   }
 
+  const improveCommand = parseImproveCommand(body);
+  if (improveCommand.matched) {
+    if (await hitRateLimit("improve")) {
+      return { ok: true, message: "improve command rate limited" };
+    }
+    const reviewBehavior = await getReviewBehavior();
+    await runGitHubReview({
+      context: params.context,
+      pullNumber: params.issueNumber,
+      mode: "comment",
+      trigger: "comment-command",
+      customRules: [
+        ...reviewBehavior.customRules,
+        buildGitHubImproveRule(improveCommand.focus),
+      ],
+      includeCiChecks: reviewBehavior.includeCiChecks,
+      enableSecretScan: reviewBehavior.secretScanEnabled,
+      enableAutoLabel: false,
+      throwOnError,
+    });
+    return { ok: true, message: "improve command triggered" };
+  }
+
+  const addDocCommand = parseAddDocCommand(body);
+  if (addDocCommand.matched) {
+    if (await hitRateLimit("add-doc")) {
+      return { ok: true, message: "add_doc command rate limited" };
+    }
+    const reviewBehavior = await getReviewBehavior();
+    await runGitHubReview({
+      context: params.context,
+      pullNumber: params.issueNumber,
+      mode: "comment",
+      trigger: "comment-command",
+      customRules: [
+        ...reviewBehavior.customRules,
+        buildGitHubAddDocRule(addDocCommand.focus),
+      ],
+      includeCiChecks: reviewBehavior.includeCiChecks,
+      enableSecretScan: false,
+      enableAutoLabel: false,
+      throwOnError,
+    });
+    return { ok: true, message: "add_doc command triggered" };
+  }
+
+  const reflectCommand = parseReflectCommand(body);
+  if (reflectCommand.matched) {
+    if (await hitRateLimit("reflect")) {
+      return { ok: true, message: "reflect command rate limited" };
+    }
+    const reviewBehavior = await getReviewBehavior();
+    if (!reviewBehavior.askCommandEnabled) {
+      await params.context.octokit.issues.createComment({
+        owner: params.owner,
+        repo: params.repo,
+        issue_number: params.issueNumber,
+        body: localizeText(
+          {
+            zh: "`/reflect` 依赖 `/ask` 能力，但当前仓库已禁用 ask（.mr-agent.yml -> review.askCommandEnabled=false）。",
+            en: "`/reflect` depends on `/ask`, but ask is disabled for this repository (.mr-agent.yml -> review.askCommandEnabled=false).",
+          },
+          locale,
+        ),
+      });
+      return { ok: true, message: "reflect command ignored by policy" };
+    }
+
+    const reflectQuestion = buildGitHubReflectQuestion(reflectCommand.request);
+    await runGitHubAsk({
+      context: params.context,
+      pullNumber: params.issueNumber,
+      question: reflectQuestion,
+      managedCommentKey: buildManagedCommandCommentKey("reflect", reflectQuestion),
+      trigger: "comment-command",
+      customRules: reviewBehavior.customRules,
+      includeCiChecks: reviewBehavior.includeCiChecks,
+      commentTitle: "AI Reflect",
+      displayQuestion: reflectCommand.request
+        ? `/reflect ${reflectCommand.request}`
+        : "/reflect",
+      throwOnError,
+    });
+    return { ok: true, message: "reflect command triggered" };
+  }
+
+  const similarIssueCommand = parseSimilarIssueCommand(body);
+  if (similarIssueCommand.matched) {
+    if (await hitRateLimit("similar-issue")) {
+      return { ok: true, message: "similar_issue command rate limited" };
+    }
+
+    await runGitHubSimilarIssueCommand({
+      context: params.context,
+      owner: params.owner,
+      repo: params.repo,
+      pullNumber: params.issueNumber,
+      query: similarIssueCommand.query,
+      locale,
+    });
+    return { ok: true, message: "similar_issue command triggered" };
+  }
+
   if (!body.startsWith(COMMAND)) {
     return { ok: true, message: "ignored issue_comment content" };
   }
@@ -695,6 +804,170 @@ export async function handleGitHubIssueCommentCommand(params: {
   });
 
   return { ok: true, message: "issue_comment review triggered" };
+}
+
+function buildGitHubImproveRule(focus: string): string {
+  const normalizedFocus = focus.trim();
+  if (normalizedFocus) {
+    return `Focus mode: improvement suggestions only. Prioritize high-impact fixes related to: ${normalizedFocus}. Prefer concrete code suggestions when possible.`;
+  }
+  return "Focus mode: improvement suggestions only. Prioritize high-impact fixes and include concrete code suggestions when possible.";
+}
+
+function buildGitHubAddDocRule(focus: string): string {
+  const normalizedFocus = focus.trim();
+  if (normalizedFocus) {
+    return `Focus mode: docstrings/comments only. Improve developer-facing documentation for: ${normalizedFocus}. Output only doc-related findings with concrete snippets.`;
+  }
+  return "Focus mode: docstrings/comments only. Output only documentation-related findings with concrete doc snippet suggestions.";
+}
+
+function buildGitHubReflectQuestion(request: string): string {
+  const normalizedRequest = request.trim();
+  if (normalizedRequest) {
+    return `请基于当前 PR 改动与以下目标，给出 3-5 个澄清问题，帮助作者明确需求与验收标准。目标：${normalizedRequest}。要求：每个问题一句话，按优先级排序，并附带“为什么要确认”。`;
+  }
+  return "请基于当前 PR 改动给出 3-5 个澄清问题，帮助作者明确需求与验收标准。要求：每个问题一句话，按优先级排序，并附带“为什么要确认”。";
+}
+
+async function runGitHubSimilarIssueCommand(params: {
+  context: GitHubReviewContext;
+  owner: string;
+  repo: string;
+  pullNumber: number;
+  query: string;
+  locale: UiLocale;
+}): Promise<void> {
+  if (!params.context.octokit.issues.listForRepo) {
+    await params.context.octokit.issues.createComment({
+      owner: params.owner,
+      repo: params.repo,
+      issue_number: params.pullNumber,
+      body: localizeText(
+        {
+          zh: "当前 GitHub 客户端不支持 `/similar_issue`（缺少 issues.listForRepo）。",
+          en: "Current GitHub client does not support `/similar_issue` (missing issues.listForRepo).",
+        },
+        params.locale,
+      ),
+    });
+    return;
+  }
+
+  const query = await resolveGitHubSimilarIssueQuery(params);
+  if (!query) {
+    await params.context.octokit.issues.createComment({
+      owner: params.owner,
+      repo: params.repo,
+      issue_number: params.pullNumber,
+      body: localizeText(
+        {
+          zh: "无法提取用于相似 Issue 检索的查询文本，请在命令后追加关键词，例如：`/similar_issue timeout race condition`。",
+          en: "Unable to derive a search query for similar issues. Add keywords, for example: `/similar_issue timeout race condition`.",
+        },
+        params.locale,
+      ),
+    });
+    return;
+  }
+
+  const issues = await params.context.octokit.issues.listForRepo({
+    owner: params.owner,
+    repo: params.repo,
+    state: "all",
+    sort: "updated",
+    direction: "desc",
+    per_page: 100,
+    page: 1,
+  });
+  const candidates = issues.data
+    .filter((issue) => !issue.pull_request)
+    .filter((issue) => Number(issue.number) !== params.pullNumber)
+    .map((issue) => ({
+      id: issue.number,
+      title: issue.title ?? "",
+      body: issue.body ?? "",
+      url: issue.html_url ?? "",
+      state: issue.state,
+    }))
+    .filter((issue) => Boolean(issue.url && issue.title));
+
+  const matches = findSimilarIssues({
+    query,
+    candidates,
+    limit: 5,
+  });
+
+  await params.context.octokit.issues.createComment({
+    owner: params.owner,
+    repo: params.repo,
+    issue_number: params.pullNumber,
+    body: buildGitHubSimilarIssueComment(query, matches, params.locale),
+  });
+}
+
+async function resolveGitHubSimilarIssueQuery(params: {
+  context: GitHubReviewContext;
+  owner: string;
+  repo: string;
+  pullNumber: number;
+  query: string;
+}): Promise<string> {
+  const fromCommand = params.query.trim();
+  if (fromCommand) {
+    return fromCommand;
+  }
+
+  try {
+    const pr = (
+      await params.context.octokit.pulls.get({
+        owner: params.owner,
+        repo: params.repo,
+        pull_number: params.pullNumber,
+      })
+    ).data;
+    const fromPr = [pr.title ?? "", pr.body ?? ""].join(" ").trim();
+    return fromPr;
+  } catch {
+    return "";
+  }
+}
+
+function buildGitHubSimilarIssueComment(
+  query: string,
+  matches: Array<{
+    id: number | string;
+    title: string;
+    url: string;
+    state?: string | null;
+    score: number;
+    matchedTerms: string[];
+  }>,
+  locale: UiLocale,
+): string {
+  if (matches.length === 0) {
+    return localizeText(
+      {
+        zh:
+          "## AI Similar Issue Finder\n\n未发现高相关 Issue。\n\n可尝试提供更具体关键词，例如：`/similar_issue auth token refresh race`。",
+        en:
+          "## AI Similar Issue Finder\n\nNo highly related issues found.\n\nTry more specific keywords, for example: `/similar_issue auth token refresh race`.",
+      },
+      locale,
+    );
+  }
+
+  return [
+    "## AI Similar Issue Finder",
+    "",
+    `${localizeText({ zh: "查询", en: "Query" }, locale)}: \`${query}\``,
+    "",
+    ...matches.map((item, index) => {
+      const terms = item.matchedTerms.length > 0 ? item.matchedTerms.join(", ") : "-";
+      const state = (item.state ?? "unknown").toString();
+      return `${index + 1}. [#${item.id}](${item.url}) ${item.title} (state=${state}, score=${item.score}, terms=${terms})`;
+    }),
+  ].join("\n");
 }
 
 export function isGitHubBotCommentUser(
@@ -951,6 +1224,36 @@ export function createRestBackedOctokit(
       },
     },
     issues: {
+      listForRepo: async (params) => {
+        const state = params.state ?? "all";
+        const sort = params.sort ?? "updated";
+        const direction = params.direction ?? "desc";
+        const perPage = Math.max(1, Math.min(Number(params.per_page ?? 100), 100));
+        const page = Math.max(1, Number(params.page ?? 1));
+        const data = await requestJson<GitHubIssueSummary[]>(config, {
+          method: "GET",
+          path:
+            `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/issues` +
+            `?state=${encodeURIComponent(state)}` +
+            `&sort=${encodeURIComponent(sort)}` +
+            `&direction=${encodeURIComponent(direction)}` +
+            `&per_page=${perPage}` +
+            `&page=${page}`,
+        });
+        return {
+          data: Array.isArray(data)
+            ? data.map((item) => ({
+                number: Number(item.number),
+                title: typeof item.title === "string" ? item.title : null,
+                body: typeof item.body === "string" ? item.body : null,
+                state: typeof item.state === "string" ? item.state : null,
+                html_url:
+                  typeof item.html_url === "string" ? item.html_url : null,
+                pull_request: item.pull_request,
+              }))
+            : [],
+        };
+      },
       listComments: async (params) => {
         const data = await requestJson<Array<{ id: number; body?: string | null }>>(
           config,
