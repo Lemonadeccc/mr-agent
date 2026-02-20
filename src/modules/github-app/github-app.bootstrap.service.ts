@@ -1,7 +1,7 @@
 import {
   Injectable,
   Logger,
-  OnApplicationBootstrap,
+  OnModuleInit,
 } from "@nestjs/common";
 import { HttpAdapterHost } from "@nestjs/core";
 import type { Express, RequestHandler } from "express";
@@ -10,12 +10,12 @@ import { createNodeMiddleware, createProbot } from "probot";
 import { app as githubApp } from "../../app.js";
 
 @Injectable()
-export class GithubAppBootstrapService implements OnApplicationBootstrap {
+export class GithubAppBootstrapService implements OnModuleInit {
   private readonly logger = new Logger(GithubAppBootstrapService.name);
 
   constructor(private readonly httpAdapterHost: HttpAdapterHost) {}
 
-  onApplicationBootstrap(): void {
+  onModuleInit(): void {
     const httpAdapter = this.httpAdapterHost.httpAdapter;
     if (!httpAdapter) {
       return;
