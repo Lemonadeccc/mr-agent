@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - ./data:/data
       - ./secrets/github-app.private-key.pem:/run/secrets/github-app-private-key.pem:ro
