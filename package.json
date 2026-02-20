@@ -20,6 +20,12 @@
     "check": "tsc --noEmit -p tsconfig.json",
     "dev": "tsx src/main.ts",
     "start": "node dist/main.js",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:restart": "docker compose restart mr-agent",
+    "docker:logs": "docker compose logs -f mr-agent",
+    "docker:ps": "docker compose ps",
     "test": "node --import tsx --test --test-force-exit tests/*.test.ts",
     "test:coverage": "node --import tsx --test --experimental-test-coverage --test-force-exit tests/*.test.ts"
   },
