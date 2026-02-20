@@ -1,4 +1,5 @@
 import {
+  getFreshCacheValue,
   isDuplicateRequest,
   localizeText,
   pruneExpiredCache,
@@ -449,9 +450,9 @@ async function loadRepositoryPolicyConfig(params: {
   const cacheKey = `${owner}/${repo}@${ref ?? "__default__"}`;
   const now = Date.now();
   pruneExpiredCache(policyConfigCache, now);
-  const cached = policyConfigCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
-    return cached.value;
+  const cached = getFreshCacheValue(policyConfigCache, cacheKey, now);
+  if (cached) {
+    return cached;
   }
 
   let configFromRepo: RepoPolicyConfig | undefined;

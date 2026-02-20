@@ -2,6 +2,7 @@ import {
   clearDuplicateRecord,
   ensureError,
   fnv1a32Hex,
+  getFreshCacheValue,
   isDuplicateRequest,
   loadAskConversationTurns,
   localizeText,
@@ -1026,7 +1027,7 @@ export function recordGitHubFeedbackSignal(params: {
     DEFAULT_FEEDBACK_SIGNAL_TTL_MS,
   );
   pruneExpiredCache(feedbackSignalCache, now);
-  const currentSignals = feedbackSignalCache.get(feedbackKey)?.value ?? [];
+  const currentSignals = getFreshCacheValue(feedbackSignalCache, feedbackKey, now) ?? [];
   const nextSignals = [
     normalizedSignal,
     ...currentSignals.filter((item) => item !== normalizedSignal),
@@ -1062,8 +1063,9 @@ function loadGitHubFeedbackSignals(
   const repositoryLevelKey = buildGitHubFeedbackSignalKey(owner, repo);
   const now = Date.now();
   pruneExpiredCache(feedbackSignalCache, now);
-  const scoped = feedbackSignalCache.get(feedbackKey)?.value ?? [];
-  const repositoryLevel = feedbackSignalCache.get(repositoryLevelKey)?.value ?? [];
+  const scoped = getFreshCacheValue(feedbackSignalCache, feedbackKey, now) ?? [];
+  const repositoryLevel =
+    getFreshCacheValue(feedbackSignalCache, repositoryLevelKey, now) ?? [];
   if (
     !Number.isInteger(pullNumber) ||
     (pullNumber as number) <= 0 ||
@@ -1917,12 +1919,7 @@ function shouldUseIncrementalReview(trigger: ReviewTrigger): boolean {
 function getIncrementalHead(reviewPrKey: string): string | undefined {
   const now = Date.now();
   pruneExpiredCache(incrementalHeadCache, now);
-  const cached = incrementalHeadCache.get(reviewPrKey);
-  if (!cached || cached.expiresAt <= now) {
-    return undefined;
-  }
-
-  return cached.value;
+  return getFreshCacheValue(incrementalHeadCache, reviewPrKey, now);
 }
 
 function rememberIncrementalHead(reviewPrKey: string, headSha: string): void {
@@ -2235,9 +2232,9 @@ async function loadRepositoryProcessGuidelines(params: {
   const cacheKey = `${owner}/${repo}@${ref}`;
   const now = Date.now();
   pruneExpiredCache(guidelineCache, now);
-  const cached = guidelineCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
-    return cached.value;
+  const cached = getFreshCacheValue(guidelineCache, cacheKey, now);
+  if (cached) {
+    return cached;
   }
 
   const guidelines: ProcessGuideline[] = [];

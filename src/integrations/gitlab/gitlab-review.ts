@@ -4,6 +4,7 @@ import {
   ensureError,
   fetchWithRetry,
   fnv1a32Hex,
+  getFreshCacheValue,
   isDuplicateRequest,
   isRateLimited,
   loadAskConversationTurns,
@@ -946,7 +947,7 @@ export function recordGitLabFeedbackSignal(params: {
     DEFAULT_FEEDBACK_SIGNAL_TTL_MS,
   );
   pruneExpiredCache(feedbackSignalCache, now);
-  const current = feedbackSignalCache.get(key)?.value ?? [];
+  const current = getFreshCacheValue(feedbackSignalCache, key, now) ?? [];
   feedbackSignalCache.set(key, {
     value: [signal, ...current.filter((item) => item !== signal)].slice(
       0,
@@ -2139,9 +2140,9 @@ async function loadGitLabRepositoryProcessGuidelines(params: {
   const cacheKey = `${baseUrl}:${projectId}@${ref}`;
   const now = Date.now();
   pruneExpiredCache(guidelineCache, now);
-  const cached = guidelineCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
-    return cached.value;
+  const cached = getFreshCacheValue(guidelineCache, cacheKey, now);
+  if (cached) {
+    return cached;
   }
 
   const guidelines: ProcessGuideline[] = [];
@@ -2372,12 +2373,7 @@ function shouldUseIncrementalReview(trigger: GitLabReviewTrigger): boolean {
 function getIncrementalHead(reviewMrKey: string): string | undefined {
   const now = Date.now();
   pruneExpiredCache(incrementalHeadCache, now);
-  const cached = incrementalHeadCache.get(reviewMrKey);
-  if (!cached || cached.expiresAt <= now) {
-    return undefined;
-  }
-
-  return cached.value;
+  return getFreshCacheValue(incrementalHeadCache, reviewMrKey, now);
 }
 
 function rememberIncrementalHead(reviewMrKey: string, headSha: string): void {
@@ -2398,7 +2394,7 @@ function loadGitLabFeedbackSignals(projectId: number): string[] {
   const key = `${projectId}`;
   const now = Date.now();
   pruneExpiredCache(feedbackSignalCache, now);
-  return feedbackSignalCache.get(key)?.value ?? [];
+  return getFreshCacheValue(feedbackSignalCache, key, now) ?? [];
 }
 
 async function resolveGitLabReviewPolicy(params: {
@@ -2410,9 +2406,9 @@ async function resolveGitLabReviewPolicy(params: {
   const cacheKey = `${params.baseUrl}:${params.projectId}@${params.ref}`;
   const now = Date.now();
   pruneExpiredCache(gitlabPolicyCache, now);
-  const cached = gitlabPolicyCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
-    return cached.value;
+  const cached = getFreshCacheValue(gitlabPolicyCache, cacheKey, now);
+  if (cached) {
+    return cached;
   }
 
   const raw =

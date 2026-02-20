@@ -1,4 +1,9 @@
-import { pruneExpiredCache, trimCache, type ExpiringCacheEntry } from "./cache.js";
+import {
+  getFreshCacheValue,
+  pruneExpiredCache,
+  trimCache,
+  type ExpiringCacheEntry,
+} from "./cache.js";
 import { readNumberEnv } from "./env.js";
 
 export interface AskConversationTurn {
@@ -22,7 +27,7 @@ export function loadAskConversationTurns(sessionKey: string): AskConversationTur
 
   const now = Date.now();
   pruneExpiredCache(askConversationCache, now);
-  const turns = askConversationCache.get(key)?.value ?? [];
+  const turns = getFreshCacheValue(askConversationCache, key, now) ?? [];
   return turns.map((turn) => ({ ...turn }));
 }
 
@@ -47,7 +52,7 @@ export function rememberAskConversationTurn(params: {
     readNumberEnv("ASK_SESSION_MAX_ENTRIES", DEFAULT_ASK_SESSION_MAX_ENTRIES),
   );
 
-  const current = askConversationCache.get(key)?.value ?? [];
+  const current = getFreshCacheValue(askConversationCache, key, now) ?? [];
   const next = [...current, { question, answer }];
   const trimmed = next.slice(Math.max(0, next.length - maxTurns));
 
