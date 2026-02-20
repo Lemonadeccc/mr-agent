@@ -1,5 +1,6 @@
 import { readNumberEnv } from "#core";
 import { probeAiProviderConnectivity, type AiProviderProbeResult } from "#review";
+import { incrementMetricCounter } from "./metrics.js";
 
 export interface WebhookHealthCheck {
   name: string;
@@ -32,6 +33,11 @@ export async function buildHealthStatus(params: {
   deep: boolean;
   webhook?: WebhookHealthCheck;
 }): Promise<HealthStatus> {
+  incrementMetricCounter("mr_agent_health_checks_total", {
+    mode: params.mode.trim().toLowerCase() || "unknown",
+    deep: params.deep ? "1" : "0",
+  });
+
   const base: HealthStatus = {
     ok: true,
     name: "mr-agent",

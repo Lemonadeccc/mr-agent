@@ -9,6 +9,7 @@ import {
 import type { Request, Response } from "express";
 
 import { BadWebhookRequestError, WebhookAuthError } from "#core";
+import { incrementMetricCounter } from "../../modules/webhook/metrics.js";
 
 interface ResolvedError {
   status: number;
@@ -26,6 +27,10 @@ export class HttpErrorFilter implements ExceptionFilter {
     const response = http.getResponse<Response>();
     const request = http.getRequest<Request>();
     const resolved = this.resolveError(exception);
+    incrementMetricCounter("mr_agent_http_errors_total", {
+      type: resolved.type,
+      status: `${resolved.status}`,
+    });
 
     const body = {
       ok: false,

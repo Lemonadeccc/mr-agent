@@ -27,6 +27,7 @@ export class GithubWebhookService {
     payload: unknown;
     rawBody?: Buffer | string;
     headers: Record<string, string | string[] | undefined>;
+    trustReplay?: boolean;
   }): Promise<{ ok: boolean; message: string }> {
     const normalizedHeaders = normalizeHeaderRecord(params.headers);
     const rawBody =
@@ -44,6 +45,7 @@ export class GithubWebhookService {
       rawBody,
       headers: normalizedHeaders,
       logger: this.serviceLogger,
+      skipSignatureVerification: params.trustReplay === true,
     });
   }
 }

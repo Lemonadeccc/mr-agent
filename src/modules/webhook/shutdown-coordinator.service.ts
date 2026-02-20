@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnApplicationShutdown } from "@nestjs/common";
 
+import { beginHttpShutdown } from "#core";
 import { beginAiShutdown, drainAiRequests } from "#review";
 
 @Injectable()
@@ -7,6 +8,7 @@ export class ShutdownCoordinatorService implements OnApplicationShutdown {
   private readonly logger = new Logger(ShutdownCoordinatorService.name);
 
   async onApplicationShutdown(signal?: string): Promise<void> {
+    beginHttpShutdown();
     beginAiShutdown();
     const drained = await drainAiRequests();
     if (!drained) {

@@ -49,12 +49,15 @@ export class GitlabWebhookService {
   async handleTrigger(params: {
     payload: GitLabWebhookBody | undefined;
     headers: Record<string, string | string[] | undefined>;
+    trustReplay?: boolean;
   }): Promise<{ ok: boolean; message: string }> {
     verifyGitLabWebhookPayloadSize(params.payload);
     const payload = parseGitLabPayload(params.payload);
 
     const normalizedHeaders = normalizeHeaderRecord(params.headers);
-    verifyGitLabWebhookToken(normalizedHeaders, this.logger);
+    if (!params.trustReplay) {
+      verifyGitLabWebhookToken(normalizedHeaders, this.logger);
+    }
 
     // Backward compatibility: if webhook secret is not enabled,
     // keep accepting x-gitlab-token as API token.

@@ -3210,6 +3210,48 @@ function detectSecretOnLine(
       re: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/,
     },
     {
+      kind: "GitLab Token",
+      re: /\bglpat-[A-Za-z0-9_-]{20,}\b/,
+    },
+    {
+      kind: "Google API Key",
+      re: /\bAIza[0-9A-Za-z\-_]{35}\b/,
+    },
+    {
+      kind: "Google OAuth Token",
+      re: /\bya29\.[0-9A-Za-z\-_]+\b/,
+    },
+    {
+      kind: "Slack Token",
+      re: /\bxox(?:a|b|p|r|s)-[A-Za-z0-9-]{10,}\b/,
+    },
+    {
+      kind: "Stripe Live Key",
+      re: /\bsk_live_[0-9A-Za-z]{16,}\b/,
+    },
+    {
+      kind: "NPM Token",
+      re: /\bnpm_[A-Za-z0-9]{36}\b/,
+    },
+    {
+      kind: "Twilio Secret Key",
+      re: /\bSK[0-9a-fA-F]{32}\b/,
+    },
+    {
+      kind: "Azure Storage Connection String",
+      re:
+        /\bDefaultEndpointsProtocol=https;AccountName=[^;\s]+;AccountKey=[^;\s]+;EndpointSuffix=[^;\s]+\b/i,
+    },
+    {
+      kind: "Database URL Credential",
+      re:
+        /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?):\/\/[^:\s/]+:[^@\s]+@[^\s]+/i,
+    },
+    {
+      kind: "Private Key",
+      re: /-----BEGIN (?:RSA|EC|OPENSSH|DSA|PGP) PRIVATE KEY-----/,
+    },
+    {
       kind: "Generic Secret Assignment",
       re: /\b(api[_-]?key|secret|token|password)\b\s*[:=]\s*["'][^"'\\n]{8,}["']/i,
     },

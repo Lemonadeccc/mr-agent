@@ -8,7 +8,12 @@ import type {
 } from "./review-types.js";
 import { isProcessTemplateFile } from "./review-policy.js";
 import type { AskConversationTurn, UiLocale } from "#core";
-import { fetchWithRetry, readNumberEnv, resolveUiLocale } from "#core";
+import {
+  fetchWithRetry,
+  getHttpShutdownSignal,
+  readNumberEnv,
+  resolveUiLocale,
+} from "#core";
 
 type AIProvider = "openai" | "openai-compatible" | "anthropic" | "gemini";
 
@@ -220,6 +225,18 @@ export function __resetAiConcurrencyForTests(): void {
   activeAiRequests = 0;
   aiConcurrencyWaitQueue.length = 0;
   aiShutdownRequested = false;
+}
+
+export function getAiConcurrencyStats(): {
+  activeRequests: number;
+  queuedRequests: number;
+  shutdownRequested: boolean;
+} {
+  return {
+    activeRequests: activeAiRequests,
+    queuedRequests: aiConcurrencyWaitQueue.length,
+    shutdownRequested: aiShutdownRequested,
+  };
 }
 
 export function __withAiConcurrencyLimitForTests<T>(
@@ -661,28 +678,33 @@ async function analyzeWithOpenAI(params: {
   });
 
   try {
-    const completion = await client.chat.completions.create({
-      model: params.model,
-      temperature: 0.2,
-      messages: [
-        {
-          role: "system",
-          content: systemPrompt,
-        },
-        {
-          role: "user",
-          content: params.prompt,
-        },
-      ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "pr_review",
-          strict: true,
-          schema: reviewResultJsonSchema,
+    const completion = await client.chat.completions.create(
+      {
+        model: params.model,
+        temperature: 0.2,
+        messages: [
+          {
+            role: "system",
+            content: systemPrompt,
+          },
+          {
+            role: "user",
+            content: params.prompt,
+          },
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "pr_review",
+            strict: true,
+            schema: reviewResultJsonSchema,
+          },
         },
       },
-    });
+      {
+        signal: getHttpShutdownSignal(),
+      },
+    );
 
     return parseJsonFromModelText(
       extractText(completion.choices[0]?.message.content),
@@ -695,23 +717,28 @@ async function analyzeWithOpenAI(params: {
       throw error;
     }
 
-    const completion = await client.chat.completions.create({
-      model: params.model,
-      temperature: 0.2,
-      messages: [
-        {
-          role: "system",
-          content: systemPrompt,
+    const completion = await client.chat.completions.create(
+      {
+        model: params.model,
+        temperature: 0.2,
+        messages: [
+          {
+            role: "system",
+            content: systemPrompt,
+          },
+          {
+            role: "user",
+            content: `${params.prompt}\n\n请直接返回 JSON。`,
+          },
+        ],
+        response_format: {
+          type: "json_object",
         },
-        {
-          role: "user",
-          content: `${params.prompt}\n\n请直接返回 JSON。`,
-        },
-      ],
-      response_format: {
-        type: "json_object",
       },
-    });
+      {
+        signal: getHttpShutdownSignal(),
+      },
+    );
 
     return parseJsonFromModelText(
       extractText(completion.choices[0]?.message.content),
@@ -779,28 +806,33 @@ async function askWithOpenAI(params: {
   });
 
   try {
-    const completion = await client.chat.completions.create({
-      model: params.model,
-      temperature: 0.2,
-      messages: [
-        {
-          role: "system",
-          content: systemPrompt,
-        },
-        {
-          role: "user",
-          content: params.prompt,
-        },
-      ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "pr_ask",
-          strict: true,
-          schema: askResultJsonSchema,
+    const completion = await client.chat.completions.create(
+      {
+        model: params.model,
+        temperature: 0.2,
+        messages: [
+          {
+            role: "system",
+            content: systemPrompt,
+          },
+          {
+            role: "user",
+            content: params.prompt,
+          },
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "pr_ask",
+            strict: true,
+            schema: askResultJsonSchema,
+          },
         },
       },
-    });
+      {
+        signal: getHttpShutdownSignal(),
+      },
+    );
 
     return parseJsonFromModelText(
       extractText(completion.choices[0]?.message.content),
@@ -813,23 +845,28 @@ async function askWithOpenAI(params: {
       throw error;
     }
 
-    const completion = await client.chat.completions.create({
-      model: params.model,
-      temperature: 0.2,
-      messages: [
-        {
-          role: "system",
-          content: systemPrompt,
+    const completion = await client.chat.completions.create(
+      {
+        model: params.model,
+        temperature: 0.2,
+        messages: [
+          {
+            role: "system",
+            content: systemPrompt,
+          },
+          {
+            role: "user",
+            content: `${params.prompt}\n\n请直接返回 JSON。`,
+          },
+        ],
+        response_format: {
+          type: "json_object",
         },
-        {
-          role: "user",
-          content: `${params.prompt}\n\n请直接返回 JSON。`,
-        },
-      ],
-      response_format: {
-        type: "json_object",
       },
-    });
+      {
+        signal: getHttpShutdownSignal(),
+      },
+    );
 
     return parseJsonFromModelText(
       extractText(completion.choices[0]?.message.content),

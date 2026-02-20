@@ -6,3 +6,6 @@ dist
 .worktrees/
 docs/
 .mr-agent-runtime-state.json
+.mr-agent-runtime-state.sqlite3
+.mr-agent-runtime-state.sqlite3-shm
+.mr-agent-runtime-state.sqlite3-wal

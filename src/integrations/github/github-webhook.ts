@@ -140,6 +140,7 @@ export async function handlePlainGitHubWebhook(params: {
   rawBody: string;
   headers: Record<string, string | undefined>;
   logger: LoggerLike;
+  skipSignatureVerification?: boolean;
 }): Promise<{ ok: boolean; message: string }> {
   verifyGitHubWebhookBodySize(params.rawBody);
   const eventName = params.headers["x-github-event"]?.toLowerCase();
@@ -147,7 +148,9 @@ export async function handlePlainGitHubWebhook(params: {
     throw new BadWebhookRequestError("missing x-github-event header");
   }
 
-  verifyWebhookSignature(params.rawBody, params.headers);
+  if (!params.skipSignatureVerification) {
+    verifyWebhookSignature(params.rawBody, params.headers);
+  }
 
   const token = process.env.GITHUB_WEBHOOK_TOKEN ?? process.env.GITHUB_TOKEN;
   if (!token) {

@@ -2084,9 +2084,26 @@ function detectSecretOnLine(
       kind: "GitHub Token",
       pattern: /\b(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,})\b/,
     },
+    { kind: "GitLab Token", pattern: /\bglpat-[A-Za-z0-9_-]{20,}\b/ },
+    { kind: "Google API Key", pattern: /\bAIza[0-9A-Za-z\-_]{35}\b/ },
+    { kind: "Google OAuth Token", pattern: /\bya29\.[0-9A-Za-z\-_]+\b/ },
+    { kind: "Slack Token", pattern: /\bxox(?:a|b|p|r|s)-[A-Za-z0-9-]{10,}\b/ },
+    { kind: "Stripe Live Key", pattern: /\bsk_live_[0-9A-Za-z]{16,}\b/ },
+    { kind: "NPM Token", pattern: /\bnpm_[A-Za-z0-9]{36}\b/ },
+    { kind: "Twilio Secret Key", pattern: /\bSK[0-9a-fA-F]{32}\b/ },
     {
       kind: "Private Key",
       pattern: /-----BEGIN (?:RSA|EC|OPENSSH|DSA|PGP) PRIVATE KEY-----/,
+    },
+    {
+      kind: "Azure Storage Connection String",
+      pattern:
+        /\bDefaultEndpointsProtocol=https;AccountName=[^;\s]+;AccountKey=[^;\s]+;EndpointSuffix=[^;\s]+\b/i,
+    },
+    {
+      kind: "Database URL Credential",
+      pattern:
+        /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?):\/\/[^:\s/]+:[^@\s]+@[^\s]+/i,
     },
     {
       kind: "Generic Credential",

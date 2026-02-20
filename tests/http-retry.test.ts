@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { computeRetryDelayMs, fetchWithRetry } from "../src/core/http.ts";
+import {
+  __resetHttpShutdownForTests,
+  beginHttpShutdown,
+  computeRetryDelayMs,
+  fetchWithRetry,
+} from "../src/core/http.ts";
 
 test("http retry delay grows exponentially by attempt", () => {
   assert.equal(computeRetryDelayMs(0, 400, 0), 400);
@@ -62,6 +67,27 @@ test("fetchWithRetry does not retry non-retryable status", async () => {
     assert.equal(response.status, 400);
     assert.equal(callCount, 1);
   } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchWithRetry aborts immediately after http shutdown starts", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("ok", { status: 200 });
+
+  try {
+    __resetHttpShutdownForTests();
+    beginHttpShutdown();
+    await assert.rejects(
+      () =>
+        fetchWithRetry("https://example.test/shutdown", {}, {
+          retries: 0,
+          timeoutMs: 1000,
+        }),
+      /http client is shutting down/i,
+    );
+  } finally {
+    __resetHttpShutdownForTests();
     globalThis.fetch = originalFetch;
   }
 });

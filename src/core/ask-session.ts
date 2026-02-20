@@ -1,9 +1,3 @@
-import {
-  getFreshCacheValue,
-  pruneExpiredCache,
-  trimCache,
-  type ExpiringCacheEntry,
-} from "./cache.js";
 import { readNumberEnv } from "./env.js";
 import {
   clearRuntimeStateScope,
@@ -21,10 +15,6 @@ const DEFAULT_ASK_SESSION_MAX_TURNS = 6;
 const DEFAULT_ASK_SESSION_MAX_ENTRIES = 2_000;
 const ASK_SESSION_STATE_SCOPE = "ask-conversation-turns";
 
-type AskConversationCacheEntry = ExpiringCacheEntry<AskConversationTurn[]>;
-
-const askConversationCache = new Map<string, AskConversationCacheEntry>();
-
 export function loadAskConversationTurns(sessionKey: string): AskConversationTurn[] {
   const key = normalizeSessionKey(sessionKey);
   if (!key) {
@@ -32,11 +22,8 @@ export function loadAskConversationTurns(sessionKey: string): AskConversationTur
   }
 
   const now = Date.now();
-  pruneExpiredCache(askConversationCache, now);
   const turns =
-    getFreshCacheValue(askConversationCache, key, now) ??
-    loadRuntimeStateValue<AskConversationTurn[]>(ASK_SESSION_STATE_SCOPE, key, now) ??
-    [];
+    loadRuntimeStateValue<AskConversationTurn[]>(ASK_SESSION_STATE_SCOPE, key, now) ?? [];
   return turns.map((turn) => ({ ...turn }));
 }
 
@@ -53,7 +40,6 @@ export function rememberAskConversationTurn(params: {
   }
 
   const now = Date.now();
-  pruneExpiredCache(askConversationCache, now);
   const ttlMs = Math.max(1, readNumberEnv("ASK_SESSION_TTL_MS", DEFAULT_ASK_SESSION_TTL_MS));
   const maxTurns = Math.max(1, readNumberEnv("ASK_SESSION_MAX_TURNS", DEFAULT_ASK_SESSION_MAX_TURNS));
   const maxEntries = Math.max(
@@ -61,15 +47,11 @@ export function rememberAskConversationTurn(params: {
     readNumberEnv("ASK_SESSION_MAX_ENTRIES", DEFAULT_ASK_SESSION_MAX_ENTRIES),
   );
 
-  const current = getFreshCacheValue(askConversationCache, key, now) ?? [];
+  const current =
+    loadRuntimeStateValue<AskConversationTurn[]>(ASK_SESSION_STATE_SCOPE, key, now) ?? [];
   const next = [...current, { question, answer }];
   const trimmed = next.slice(Math.max(0, next.length - maxTurns));
 
-  askConversationCache.set(key, {
-    value: trimmed,
-    expiresAt: now + ttlMs,
-  });
-  trimCache(askConversationCache, maxEntries);
   saveRuntimeStateValue({
     scope: ASK_SESSION_STATE_SCOPE,
     key,
@@ -84,6 +66,5 @@ function normalizeSessionKey(raw: string): string {
 }
 
 export function __clearAskConversationCacheForTests(): void {
-  askConversationCache.clear();
   clearRuntimeStateScope(ASK_SESSION_STATE_SCOPE);
 }
