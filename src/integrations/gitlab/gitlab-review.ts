@@ -2108,17 +2108,40 @@ function resolveGitLabBaseUrl(
   baseUrlFromEnv: string | undefined,
   projectWebUrl: string,
 ): string {
+  const allowInsecureHttp = readBoolEnv("ALLOW_INSECURE_GITLAB_HTTP");
   const fromEnv = baseUrlFromEnv?.trim();
   if (fromEnv) {
-    return fromEnv.replace(/\/$/, "");
+    return ensureSecureGitLabBaseUrl(fromEnv.replace(/\/$/, ""), allowInsecureHttp);
   }
 
   try {
     const parsed = new URL(projectWebUrl);
-    return parsed.origin;
+    return ensureSecureGitLabBaseUrl(parsed.origin, allowInsecureHttp);
   } catch {
     throw new Error("Missing GITLAB_BASE_URL and cannot infer from project.web_url");
   }
+}
+
+function ensureSecureGitLabBaseUrl(
+  baseUrl: string,
+  allowInsecureHttp: boolean,
+): string {
+  if (!allowInsecureHttp && /^http:\/\//i.test(baseUrl)) {
+    throw new BadWebhookRequestError(
+      "Insecure HTTP GitLab base URL is not allowed by default; use HTTPS or set ALLOW_INSECURE_GITLAB_HTTP=true for local testing",
+    );
+  }
+  return baseUrl;
+}
+
+function readBoolEnv(key: string): boolean {
+  const normalized = (process.env[key] ?? "").trim().toLowerCase();
+  return (
+    normalized === "true" ||
+    normalized === "1" ||
+    normalized === "yes" ||
+    normalized === "on"
+  );
 }
 
 function parseMode(modeRaw: string | undefined): ReviewMode | undefined {

@@ -276,3 +276,45 @@ test("plain github webhook forbids signature-skip mode in production", async () 
     process.env.GITHUB_WEBHOOK_TOKEN = originalToken;
   }
 });
+
+test("gitlab webhook rejects insecure http base url by default", async () => {
+  const originalBaseUrl = process.env.GITLAB_BASE_URL;
+  const originalAllowInsecure = process.env.ALLOW_INSECURE_GITLAB_HTTP;
+  process.env.GITLAB_BASE_URL = "http://gitlab.example.com";
+  delete process.env.ALLOW_INSECURE_GITLAB_HTTP;
+
+  try {
+    await assert.rejects(
+      runGitLabWebhook({
+        payload: {
+          object_kind: "merge_request",
+          project: {
+            id: 1,
+            name: "demo",
+            web_url: "https://gitlab.example.com/acme/demo",
+          },
+          object_attributes: {
+            action: "update",
+            iid: 12,
+            source_branch: "feat/x",
+            target_branch: "main",
+          },
+          user: {
+            username: "alice",
+          },
+        },
+        headers: {
+          "x-gitlab-api-token": "token",
+        },
+        logger: {
+          info: () => undefined,
+          error: () => undefined,
+        },
+      }),
+      /insecure.*http.*gitlab/i,
+    );
+  } finally {
+    process.env.GITLAB_BASE_URL = originalBaseUrl;
+    process.env.ALLOW_INSECURE_GITLAB_HTTP = originalAllowInsecure;
+  }
+});
