@@ -408,6 +408,7 @@
   font-size: 13px;
   line-height: 18px;
   min-height: 40px;
+  overflow-wrap: anywhere;
   padding: 10px;
 }
 
@@ -614,7 +615,7 @@
   .stage {
     margin-left: 0;
     margin-top: 0;
-    padding: 28px 20px 120px;
+    padding: 28px 16px 180px;
     width: 100%;
   }
 
@@ -637,31 +638,42 @@
 
   .tableHeader,
   .tableRow {
-    grid-template-columns: 1.2fr 2fr 1.2fr;
+    grid-template-columns: 1.1fr 2fr 1.1fr;
   }
 
   .nav {
-    bottom: 16px;
+    bottom: 12px;
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    left: 20px;
-    right: 20px;
+    left: 12px;
+    right: 12px;
     top: auto;
   }
 
   .navLink {
-    border-bottom: 0;
+    border-bottom: 1px solid #dcdcdc;
     border-right: 1px solid #dcdcdc;
+    font-size: 11px;
+    height: 34px;
+    line-height: 34px;
     min-width: 0;
     overflow: hidden;
-    padding: 0 4px;
+    padding: 0 8px;
     text-align: center;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
+  .navLink:nth-child(3n) {
+    border-right: 0;
+  }
+
+  .navLink:nth-last-child(-n + 3) {
+    border-bottom: 0;
+  }
+
   .mermaidHost {
-    min-width: 980px;
+    min-width: 760px;
   }
 
   .navLink:last-child {
@@ -671,5 +683,120 @@
   .cardDisplayTitle {
     font-size: 26px;
     line-height: 34px;
+  }
+}
+
+@media (max-width: 760px) {
+  .stage {
+    padding: 22px 12px 226px;
+  }
+
+  .contentCard {
+    margin-bottom: 26px;
+    padding: 14px;
+  }
+
+  .cardDisplayTitle {
+    font-size: 22px;
+    line-height: 30px;
+  }
+
+  .cardBodyText {
+    font-size: 13px;
+    line-height: 19px;
+  }
+
+  .tableWrap {
+    border-top: 0;
+    margin-top: 14px;
+  }
+
+  .tableHeader {
+    display: none;
+  }
+
+  .tableRow {
+    background: #ffffff;
+    border: 1px solid #dcdcdc;
+    border-bottom: 1px solid #dcdcdc;
+    display: block;
+    margin-bottom: 10px;
+  }
+
+  .tableRow:hover {
+    background: #ffffff;
+  }
+
+  .tableCell {
+    align-items: baseline;
+    border-bottom: 1px solid #ededed;
+    border-right: 0;
+    display: grid;
+    gap: 10px;
+    grid-template-columns: minmax(84px, 110px) 1fr;
+    min-height: auto;
+    padding: 10px 12px;
+  }
+
+  .tableCell::before {
+    color: #666666;
+    content: attr(data-label);
+    font-family:
+      "Courier New",
+      Courier,
+      monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    line-height: 16px;
+    text-transform: uppercase;
+  }
+
+  .tableCell:last-child {
+    border-bottom: 0;
+  }
+
+  .tableCellMono {
+    font-size: 11px;
+  }
+
+  .nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    left: 10px;
+    right: 10px;
+  }
+
+  .navLink:nth-child(3n) {
+    border-right: 1px solid #dcdcdc;
+  }
+
+  .navLink:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .navLink:nth-last-child(-n + 3) {
+    border-bottom: 1px solid #dcdcdc;
+  }
+
+  .navLink:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+
+  .mermaidViewport {
+    padding: 6px;
+  }
+
+  .mermaidHost {
+    min-width: 620px;
+  }
+
+  .mermaidToolButton {
+    min-width: 30px;
+    padding: 7px 8px;
+  }
+
+  .externalLink {
+    justify-content: center;
+    width: 100%;
   }
 }

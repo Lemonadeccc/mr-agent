@@ -217,6 +217,7 @@ function MatrixTable(props: { headers: [string, string, string]; rows: TableRow[
           {row.cells.map((cell, index) => (
             <div
               key={`${row.cells[0]}-${index}`}
+              data-label={headers[index]}
               className={`${styles.tableCell} ${
                 row.monoColumns?.includes(index) ? styles.tableCellMono : ""
               }`}
