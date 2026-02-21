@@ -1,221 +1,581 @@
 # MR Agent
 
-基于 TypeScript + NestJS 的 AI 代码评审服务，支持：
+AI-powered code review service built with TypeScript + NestJS. Automatically reviews Pull Requests and Merge Requests using LLM providers, with support for GitHub (App & Webhook) and GitLab.
 
-- GitHub App 模式（推荐）
-- 普通 GitHub Webhook 模式
-- GitLab Webhook 兼容模式
+[中文文档](./README-zh.md)
 
-支持的评审触发：
+## Table of Contents
 
-- PR 打开/更新时自动评审（`opened` / `synchronize`，可在 `.mr-agent.yml` 配置）
-- PR 合并后自动评审（`report`）
-- PR 评论命令触发（`/ai-review`）
-- PR 问答命令（`/ask <问题>`）
-- PR CI 诊断命令（`/checks [附加问题]`）
-- PR 测试生成命令（`/generate_tests [重点]`）
-- PR Changelog 命令（`/changelog [重点]`、`/changelog --apply [重点]`）
-- PR 描述生成命令（`/describe`、`/describe --apply`）
-- PR 反馈学习命令（`/feedback resolved|dismissed|up|down [备注]`）
-- Webhook Header 指定 `report/comment`
-- Issue 创建/编辑时流程预检（GitHub）
-- PR 创建/编辑/同步时合并前流程预检（GitHub）
+- [Features](#features)
+- [Review Triggers](#review-triggers)
+- [Roadmap & Process Assets](#roadmap--process-assets)
+- [Architecture](#architecture)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+- [Configuration](#configuration)
+- [Deployment](#deployment)
+- [Platform Integration](#platform-integration)
+- [Commands](#commands)
+- [Repository Policy](#repository-policy)
+- [Observability](#observability)
+- [Testing](#testing)
+- [License](#license)
 
-支持的模型 Provider：
+---
 
+## Features
+
+**Core Review**
+- Automatic AI code review on PR open / update / merge
+- Inline comments with GitHub Suggested Changes
+- Report-mode summaries with risk assessment
+- Incremental review (only new commits since last review)
+- Mermaid change-structure diagrams in reports (directory/file visualization)
+- Secret leak detection in diffs (lightweight regex-based scanning)
+- Auto-labeling (bugfix / feature / refactor / docs / security)
+- GitLab review-mode override via webhook header (`x-ai-mode: report|comment`)
+
+**Interactive Commands**
+- `/ai-review` — trigger manual review (comment or report mode)
+- `/ask <question>` — multi-turn Q&A about the code
+- `/checks [question]` — diagnose CI failures
+- `/generate_tests [focus]` — generate test code
+- `/changelog [--apply]` — generate or commit changelog
+- `/describe [--apply]` — generate or update PR description
+- `/improve [focus]` — force improvement-focused review output
+- `/add_doc [focus]` (`/add-doc`) — documentation-only review suggestions
+- `/reflect [goal]` — ask AI to generate requirement/acceptance clarifying questions
+- `/similar_issue [query]` (`/similar-issue`) — find related issues in the same repository
+- `/feedback` — provide learning signals to improve future reviews
+
+**Process Guardrails**
+- `.mr-agent.yml` per-repo policy (remind or enforce mode)
+- Issue & PR template completeness checks
+- GitHub Check integration for branch protection (`enforce` mode)
+- Process guideline detection (`.github/.gitlab` workflows, templates, CODEOWNERS, CONTRIBUTING) with compliance suggestions
+- Issue creation/edit pre-check and PR pre-merge validation (GitHub)
+
+**Multi-Platform**
+- GitHub App (recommended)
+- Plain GitHub Webhook
+- GitLab Webhook
+
+**Multi-Provider AI**
 - OpenAI
-- OpenAI-compatible
-- Anthropic
-- Gemini
+- OpenAI-compatible (DeepSeek, etc.)
+- Anthropic (Claude)
+- Google Gemini
 
-## 功能对齐目标（相对 `mr-agent/mr-agent`）
+### Review Triggers
 
-当前版本已覆盖参考实现的核心链路，并增加：
+| Trigger | Mode | Dedup Window |
+|---|---|---|
+| PR opened (`opened`) | comment / report (per config) | 5 min |
+| PR updated (`synchronize`) | comment / report | 5 min (per new commit SHA) |
+| PR edited (`edited`) | comment / report | 5 min |
+| PR merged (`closed` + merged) | report | 24h (configurable) |
+| `/ai-review` comment command | comment / report | 5 min |
+| `/ai-review report` | report | 5 min |
+| `/ai-review comment` | comment | 5 min |
+| Webhook header `x-ai-mode` (GitLab only) | report / comment | 5 min |
+| Issue created / edited | pre-check (GitHub) | — |
+| PR created / edited / synced | pre-merge check (GitHub) | — |
 
-- GitHub App + 普通 GitHub Webhook 双模式
-- OpenAI-compatible provider
-- GitHub 与 GitLab 双平台
-- 重复请求去重（5 分钟）
-- `merged + report` 独立去重窗口（默认 24 小时，可配置）
-- Issue/PR 流程守卫（模板完整性检查、GitHub Flow 预检）
-- 仓库级策略配置（`.mr-agent.yml`，支持 `remind/enforce`）
-- GitHub Suggested Changes 建议代码块（模型返回 `suggestion` 时）
-- PR 增量评审（`synchronize/edited` 优先按新增 commit 对比）
-- `enforce` 模式可写 GitHub Check（可接 branch protection）
-- 疑似密钥泄露提示（基于 diff 的轻量规则扫描）
-- 自动标签（bugfix/feature/refactor/docs/security 等）
-- 报告内 Mermaid 变更结构图（按目录/文件可视化）
-- 反馈学习信号（`/feedback` 与 review thread `resolved/unresolved`）
-- Changelog 自动写回（`/changelog --apply`，可直接更新仓库文件）
-- 超时/重试与错误分层（Webhook 鉴权错误、请求错误）
-- `.github/.gitlab` 模板/流程文件识别（workflow/template/CODEOWNERS/CONTRIBUTING）并给出流程建议
-- 外部 webhook 调用失败时返回结构化错误（含 `type/status/path/method/timestamp`）
+### Roadmap & Process Assets
 
-## 路线图与流程资产
+- Competitive gap backlog: `docs/roadmap/2026-02-19-competitive-gap-backlog.md`
+- GitHub issue templates: `.github/ISSUE_TEMPLATE/bug_report.md`, `.github/ISSUE_TEMPLATE/feature_request.md`
+- GitHub PR template: `.github/pull_request_template.md`
+- GitLab issue templates: `.gitlab/issue_templates/Bug.md`, `.gitlab/issue_templates/Feature.md`
+- GitLab MR template: `.gitlab/merge_request_templates/default.md`
 
-- 竞争差距落地 backlog：`docs/roadmap/2026-02-19-competitive-gap-backlog.md`
-- GitHub issue 模板：`.github/ISSUE_TEMPLATE/bug_report.md`、`.github/ISSUE_TEMPLATE/feature_request.md`
-- GitHub PR 模板：`.github/pull_request_template.md`
-- GitLab issue 模板：`.gitlab/issue_templates/Bug.md`、`.gitlab/issue_templates/Feature.md`
-- GitLab MR 模板：`.gitlab/merge_request_templates/default.md`
+**Recommended GitHub Flow baseline:**
 
-建议的 GitHub Flow 基线：
+1. Enable branch protection — require `MR Agent Policy` check and CI to pass.
+2. Set `mode: enforce` in `.mr-agent.yml` (start with core repositories, then roll out).
+3. Use standardized issue/PR templates to prevent missing requirements and test plans.
 
-1. 开启 branch protection，至少要求 `MR Agent Policy` 与 CI 必过。
-2. 在仓库启用 `.mr-agent.yml` 的 `mode: enforce`（可先从核心仓库灰度）。
-3. 统一使用 issue/PR 模板，避免需求与验证信息缺失。
+---
 
-## 快速开始
+## Architecture
+
+### High-Level Overview
+
+```mermaid
+graph TB
+    subgraph Platforms
+        GH_APP[GitHub App<br/>Probot]
+        GH_WH[GitHub Webhook]
+        GL_WH[GitLab Webhook]
+    end
+
+    subgraph NestJS Application
+        direction TB
+        CTRL[Controllers<br/>Route & Validate]
+        SVC[Services<br/>Signature Verify & Dispatch]
+        INT[Integration Layer<br/>GitHub / GitLab Adapters]
+        RE[Review Engine<br/>AI Reviewer + Patch Parser]
+        RR[Report Renderer<br/>Markdown + Suggestions]
+    end
+
+    subgraph External
+        AI[AI Providers<br/>OpenAI / Anthropic / Gemini]
+        GH_API[GitHub API]
+        GL_API[GitLab API]
+        NOTIFY[Notifications<br/>Slack / Discord / WeChat]
+    end
+
+    GH_APP -->|Webhook Event| CTRL
+    GH_WH -->|Webhook Event| CTRL
+    GL_WH -->|Webhook Event| CTRL
+    CTRL --> SVC
+    SVC --> INT
+    INT --> RE
+    RE -->|LLM Call| AI
+    RE --> RR
+    RR -->|Post Comment / Report| GH_API
+    RR -->|Post Comment / Report| GL_API
+    INT -.->|Optional| NOTIFY
+```
+
+### Request Processing Flow
+
+```mermaid
+sequenceDiagram
+    participant P as Platform (GitHub/GitLab)
+    participant C as Controller
+    participant S as Service
+    participant D as Deduplication
+    participant I as Integration
+    participant A as AI Reviewer
+    participant R as Report Renderer
+
+    P->>C: Webhook Event
+    C->>S: Validate signature & parse payload
+    S->>D: Check dedup (FNV hash, 5min window)
+    alt Duplicate
+        D-->>S: Skip (already processed)
+    else New request
+        D-->>S: Proceed
+        S->>I: Dispatch to platform handler
+        I->>I: Fetch diff, file contents, policy
+        I->>A: Send context + diff to AI model
+        A-->>I: Structured review result (Zod-validated)
+        I->>R: Format report / inline comments
+        R->>P: Post review via API
+        I-->>P: Optional notification webhook
+    end
+```
+
+### Module Dependency Graph
+
+```mermaid
+graph LR
+    subgraph NestJS Modules
+        APP[AppModule]
+        GH[GithubModule]
+        GL[GitlabModule]
+        GHA[GithubAppModule]
+    end
+
+    subgraph Integration Layer
+        GHR[github-review]
+        GHW[github-webhook]
+        GHP[github-policy]
+        GHC[github-content]
+        GLR[gitlab-review]
+        NTF[notification]
+    end
+
+    subgraph Core
+        REV[ai-reviewer]
+        PAT[patch parser]
+        RPT[report-renderer]
+        POL[review-policy]
+        DDP[dedupe]
+        HTTP[http client]
+        STA[runtime-state]
+        SEC[secret-patterns]
+        CACHE[cache]
+    end
+
+    APP --> GH
+    APP --> GL
+    APP --> GHA
+
+    GH --> GHR
+    GH --> GHW
+    GHA --> GHR
+
+    GHR --> GHP
+    GHR --> GHC
+    GHR --> REV
+    GHR --> RPT
+    GHR --> NTF
+
+    GLR --> REV
+    GLR --> RPT
+    GLR --> NTF
+    GL --> GLR
+
+    REV --> PAT
+    REV --> POL
+    REV --> HTTP
+
+    GHR --> DDP
+    GLR --> DDP
+    DDP --> STA
+    GHR --> SEC
+    GLR --> SEC
+    GHP --> CACHE
+```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Runtime | Node.js 22 (Alpine) |
+| Language | TypeScript 5.7 (ES2022, strict mode) |
+| Framework | NestJS 11 |
+| HTTP Server | Express 4 |
+| GitHub App | Probot 13 |
+| AI Client | OpenAI SDK 4 (also used for compatible providers) |
+| Validation | Zod 3 |
+| State Store | In-memory / JSON file / SQLite (Node.js built-in `node:sqlite`) |
+| Container | Docker (multi-stage build) |
+
+---
+
+## Project Structure
+
+```
+mr-agent/
+├── src/
+│   ├── main.ts                     # NestJS bootstrap & server startup
+│   ├── app.module.ts               # Root module (imports all sub-modules)
+│   ├── app.controller.ts           # Health, metrics, replay endpoints
+│   ├── app.ts                      # Probot event handlers (GitHub App)
+│   │
+│   ├── core/                       # Shared infrastructure
+│   │   ├── cache.ts                #   TTL-based in-memory cache
+│   │   ├── dedupe.ts               #   FNV hash request deduplication
+│   │   ├── env.ts                  #   Environment variable helpers
+│   │   ├── errors.ts               #   Typed error classes (4xx/5xx)
+│   │   ├── http.ts                 #   HTTP client with retry & backoff
+│   │   ├── i18n.ts                 #   Locale detection (zh/en)
+│   │   ├── rate-limit.ts           #   Per-scope rate limiting
+│   │   ├── runtime-state.ts        #   Pluggable state backend
+│   │   └── secret-patterns.ts      #   Regex-based secret detection
+│   │
+│   ├── review/                     # AI review domain
+│   │   ├── ai-reviewer.ts          #   Multi-provider AI abstraction
+│   │   ├── patch.ts                #   Git diff parsing & line mapping
+│   │   ├── report-renderer.ts      #   Markdown report formatting
+│   │   ├── review-policy.ts        #   Zod schemas & policy config
+│   │   └── review-types.ts         #   Data models
+│   │
+│   ├── integrations/
+│   │   ├── github/                 #   GitHub review, policy, content
+│   │   ├── gitlab/                 #   GitLab review & command handling
+│   │   └── notify/                 #   Webhook notifications
+│   │
+│   ├── modules/
+│   │   ├── github/                 #   NestJS GitHub Webhook module
+│   │   ├── gitlab/                 #   NestJS GitLab Webhook module
+│   │   ├── github-app/             #   NestJS GitHub App module (Probot)
+│   │   └── webhook/                #   Health, metrics, shutdown, replay
+│   │
+│   └── common/
+│       └── filters/
+│           └── http-error.filter.ts  # Global exception filter
+│
+├── tests/                          # Node.js test runner (20+ test files)
+├── README-zh.md                    # Chinese version of this documentation
+├── docs/                           # Design docs & roadmap
+├── Dockerfile                      # Multi-stage Docker build
+├── docker-compose.yml              # Docker Compose setup
+├── .env.example                    # Full env var reference
+├── .env.github-app.min.example     # Minimal GitHub App config
+└── .env.github-webhook.min.example # Minimal GitHub Webhook config
+```
+
+### Path Aliases
+
+The project uses Node.js ESM subpath imports (configured in both `tsconfig.json` and `package.json`):
+
+| Alias | Maps to |
+|---|---|
+| `#core` | `src/core/index.ts` |
+| `#review` | `src/review/index.ts` |
+| `#integrations/github` | `src/integrations/github/index.ts` |
+| `#integrations/gitlab` | `src/integrations/gitlab/index.ts` |
+| `#integrations/notify` | `src/integrations/notify/index.ts` |
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js >= 22
+- npm
+
+### Local Development
 
 ```bash
+# Install dependencies
 npm install
+
+# Start dev server (with tsx hot-reload)
 npm run dev
+
+# Build for production
+npm run build
+
+# Start production server
+npm start
 ```
 
-默认端口：`3000`
+The server listens on port `3000` by default (configurable via `PORT`).
 
-健康检查：
+### Health Check
 
-- `GET /health`
-- `GET /github/health`
-- `GET /gitlab/health`
-
-## 触发方式
-
-### 1) GitHub App 模式（推荐）
-
-1. 创建 GitHub App，并安装到目标仓库。
-2. 权限：
-   - `Pull requests`: Read & write
-   - `Issues`: Read & write
-   - `Checks`: Read & write（仅当使用 `mode=enforce` 时必需）
-   - `Metadata`: Read-only
-3. 订阅事件：
-   - `Pull request`（`opened` / `edited` / `synchronize` / `closed`）
-   - `Issues`（`opened` / `edited`）
-   - `Issue comment`
-   - `Pull request review thread`（`resolved` / `unresolved`，用于反馈学习）
-4. Webhook URL：
-
-```text
-https://<your-domain>/api/github/webhooks
+```bash
+curl http://localhost:3000/health
+curl http://localhost:3000/health?deep=true   # Tests AI provider connectivity
+curl http://localhost:3000/github/health       # GitHub config status
+curl http://localhost:3000/gitlab/health       # GitLab config status
 ```
 
-评论命令：
+---
 
-```text
-/ai-review
-/ai-review report
-/ai-review comment
-/ask 这个函数有并发风险吗？
-/checks 为什么这个 CI 失败？
-/generate_tests 并发与异常路径
-/changelog 用户可见行为变化
-/changelog --apply 用户可见行为变化
-/feedback resolved 这个建议很实用
-/describe
-/describe --apply
+## Configuration
+
+### Environment Variables
+
+Copy `.env.example` and fill in the required values. Minimal configs are also available:
+
+- `.env.github-app.min.example` — GitHub App minimum
+- `.env.github-webhook.min.example` — Plain GitHub Webhook minimum
+
+### AI Provider
+
+```mermaid
+graph LR
+    ENV[AI_PROVIDER env var]
+    ENV -->|openai| OAI[OpenAI<br/>OPENAI_API_KEY + OPENAI_MODEL]
+    ENV -->|openai-compatible| OC[OpenAI-Compatible<br/>OPENAI_BASE_URL + OPENAI_COMPATIBLE_MODEL]
+    ENV -->|anthropic| ANT[Anthropic<br/>ANTHROPIC_API_KEY + ANTHROPIC_MODEL]
+    ENV -->|gemini| GEM[Gemini<br/>GEMINI_API_KEY + GEMINI_MODEL]
 ```
 
-说明：若未配置 `APP_ID + PRIVATE_KEY(+WEBHOOK_SECRET)`，GitHub App 模式会自动禁用，但普通 Webhook 仍可用。
-
-### 2) 普通 GitHub Webhook 模式
-
-Webhook URL：
-
-```text
-https://<your-domain>/github/trigger
+**OpenAI (default)**
+```env
+AI_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4.1-mini
 ```
 
-事件：`Pull request` + `Issues` + `Issue comment` + `Pull request review thread`
-
-Secret：`GITHUB_WEBHOOK_SECRET`
-
-用于回写评论的 token：`GITHUB_WEBHOOK_TOKEN`（可用 `GITHUB_TOKEN` 兜底）
-
-### 3) GitLab Webhook 兼容模式
-
-Webhook URL：
-
-```text
-https://<your-domain>/gitlab/trigger
+**OpenAI-Compatible (e.g., DeepSeek)**
+```env
+AI_PROVIDER=openai-compatible
+OPENAI_BASE_URL=https://api.deepseek.com/v1
+OPENAI_COMPATIBLE_API_KEY=...
+OPENAI_COMPATIBLE_MODEL=deepseek-chat
 ```
 
-请求头：
-
-- `x-ai-mode`: `report` 或 `comment`
-- `x-gitlab-api-token`: GitLab API Token（推荐）
-- `x-gitlab-token`: 仅当配置 `GITLAB_WEBHOOK_SECRET` 时用于 webhook 鉴权
-- 可选：`x-push-url` / `x-qwx-robot-url`
-
-事件建议订阅：
-
-- `Merge request`（open/reopen/update/merge）
-- `Note`（在 MR 评论里触发 `/ai-review`、`/ask`、`/checks`、`/describe`、`/generate_tests`、`/changelog`、`/feedback`）
-
-兼容行为：当未配置 `GITLAB_WEBHOOK_SECRET` 时，`x-gitlab-token` 仍可兼容作为 API token 使用。
-
-GitLab MR 评论命令示例：
-
-```text
-/ai-review
-/ai-review report
-/ask 这个变更会引入并发问题吗？
-/checks 为什么 pipeline 失败？
-/generate_tests 边界与回归场景
-/changelog 用户可见行为变化
-/changelog --apply 用户可见行为变化
-/describe
-/describe --apply
-/feedback down 这条建议噪音偏高
+**Anthropic**
+```env
+AI_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_MODEL=claude-3-5-haiku-latest
+ANTHROPIC_MAX_TOKENS=8192
 ```
 
-## Webhook 错误响应
-
-当 webhook 请求失败时，会返回结构化 JSON（HTTP 非 2xx）：
-
-```json
-{
-  "ok": false,
-  "error": "详细错误信息",
-  "type": "ErrorType",
-  "status": 400,
-  "path": "/github/trigger",
-  "method": "POST",
-  "timestamp": "2026-02-17T00:00:00.000Z"
-}
+**Gemini**
+```env
+AI_PROVIDER=gemini
+GEMINI_API_KEY=...
+GEMINI_MODEL=gemini-2.0-flash
 ```
 
-说明：请求体超过 `WEBHOOK_BODY_LIMIT`（默认 `1mb`）时会返回 `413 Payload Too Large`。
+### State Persistence
 
-## 最小化环境变量
+| Backend | Env Value | Use Case |
+|---|---|---|
+| Memory | `memory` (default) | Stateless containers, dev |
+| JSON File | `file` | Simple single-instance |
+| SQLite | `sqlite` (recommended) | Production single-instance |
 
-### 方案 A：GitHub App
+```env
+RUNTIME_STATE_BACKEND=sqlite
+RUNTIME_STATE_SQLITE_FILE=/data/mr-agent/runtime-state.sqlite3
+```
+
+### Notifications (Optional)
+
+Supports WeChat (WeCom), Slack, Discord, and generic JSON webhooks:
+
+```env
+NOTIFY_WEBHOOK_URL=https://hooks.slack.com/services/...
+NOTIFY_WEBHOOK_FORMAT=slack   # wecom | slack | discord | generic
+```
+
+### Key Tuning Parameters
+
+**Global runtime and command limits**
+
+| Variable | Default | Description |
+|---|---|---|
+| `WEBHOOK_BODY_LIMIT` | `1mb` | Global Express body-parser limit for webhook requests (returns `413` when exceeded) |
+| `COMMAND_RATE_LIMIT_MAX` | `10` | Max command invocations per user per PR/MR per window |
+| `COMMAND_RATE_LIMIT_WINDOW_MS` | `3600000` (1h) | Command rate-limit window |
+
+**GitHub-specific**
+
+| Variable | Default | Description |
+|---|---|---|
+| `GITHUB_MERGED_DEDUPE_TTL_MS` | `86400000` (24h) | Dedup window for merged + report events |
+| `GITHUB_FEEDBACK_SIGNAL_TTL_MS` | `2592000000` (30d) | Feedback signal retention window |
+| `GITHUB_INCREMENTAL_STATE_TTL_MS` | `604800000` (7d) | Incremental review SHA cache lifetime |
+| `GITHUB_POLICY_CONFIG_CACHE_TTL_MS` | `300000` (5min) | `.mr-agent.yml` cache for policy/review behavior |
+| `GITHUB_POLICY_COMMENT_DEDUPE_TTL_MS` | `600000` (10min) | Dedup window for policy reminder comments |
+| `GITHUB_WEBHOOK_MAX_BODY_BYTES` | `10485760` (10MB) | Extra hard cap for `/github/trigger` payload size |
+| `GITHUB_WEBHOOK_SKIP_SIGNATURE` | `false` | Debug-only signature bypass; forbidden when `NODE_ENV=production` |
+
+**GitLab-specific**
+
+| Variable | Default | Description |
+|---|---|---|
+| `GITLAB_MERGED_DEDUPE_TTL_MS` | `86400000` (24h) | Merged + report event dedup window |
+| `GITLAB_INCREMENTAL_STATE_TTL_MS` | `604800000` (7d) | Incremental review SHA cache |
+| `GITLAB_FEEDBACK_SIGNAL_TTL_MS` | `2592000000` (30d) | Feedback learning signal retention |
+| `GITLAB_POLICY_CONFIG_CACHE_TTL_MS` | `300000` (5min) | `.mr-agent.yml` policy cache |
+| `GITLAB_CHANGELOG_PATH` | `CHANGELOG.md` | File path for `/changelog --apply` |
+| `GITLAB_WEBHOOK_MAX_BODY_BYTES` | `10485760` (10MB) | Extra hard cap for `/gitlab/trigger` payload size |
+| `GITLAB_REQUIRE_WEBHOOK_SECRET` | `false` | Require `GITLAB_WEBHOOK_SECRET`, otherwise reject unsigned webhooks |
+| `ALLOW_INSECURE_GITLAB_HTTP` | `false` | Allow `http://` GitLab base URL for local testing only |
+
+**Tuning guidance:**
+
+- `MERGED_DEDUPE_TTL_MS` — Controls the dedup window for `merged + report` events to prevent duplicate reviews on webhook retries. Increase to `48h–72h` if you experience frequent webhook redelivery; decrease to `1h–6h` if you need faster re-trigger. This only affects merged auto-triggers; manual `/ai-review` commands use the short (5 min) dedup window.
+- `FEEDBACK_SIGNAL_TTL_MS` — Controls how long `/feedback` and review-thread resolved/unresolved signals are retained. Increase to `60–90d` for teams with slower review cadence; decrease to `7–14d` if review rules change frequently.
+- `COMMAND_RATE_LIMIT_*` — Controls abuse protection for comment commands. Increase limits for very active repos; lower limits if bots/users spam command threads.
+
+See `.env.example` for the baseline variable reference; advanced runtime knobs are listed above.
+
+---
+
+## Deployment
+
+### Docker (Recommended)
+
+```mermaid
+graph LR
+    subgraph Docker Build
+        B1[Stage 1: Build<br/>node:22-alpine<br/>npm ci + tsc]
+        B2[Stage 2: Runtime<br/>node:22-alpine<br/>prod deps only]
+        B1 -->|COPY dist/| B2
+    end
+    B2 -->|Expose 3000| SRV[mr-agent container]
+```
+
+**Build & Run**
+
+```bash
+docker build -t mr-agent:latest .
+docker run -d \
+  --name mr-agent \
+  -p 3000:3000 \
+  --env-file .env \
+  -v ./data:/data \
+  mr-agent:latest
+```
+
+### Docker Compose
+
+```bash
+# Start
+docker compose up -d --build
+
+# View logs
+docker compose logs -f mr-agent
+
+# Restart
+docker compose restart mr-agent
+
+# Stop
+docker compose down
+```
+
+The `docker-compose.yml` mounts:
+- `./data:/data` — persistent state (SQLite, event store)
+- `./secrets/github-app.private-key.pem:/run/secrets/github-app-private-key.pem:ro` — GitHub App private key
+
+### Production Deployment Checklist
+
+```mermaid
+graph TD
+    A[Choose Platform Mode] -->|GitHub App| B1[Create GitHub App]
+    A -->|Plain Webhook| B2[Generate PAT Token]
+    A -->|GitLab| B3[Generate API Token]
+
+    B1 --> C[Configure AI Provider]
+    B2 --> C
+    B3 --> C
+
+    C --> D[Set State Backend = sqlite]
+    D --> E[Deploy Container]
+    E --> F[Configure Webhook URL]
+    F --> G[Verify Health Endpoints]
+    G --> H[Test with /ai-review Command]
+```
+
+1. **Choose integration mode** — GitHub App is recommended for fine-grained permissions
+2. **Configure AI provider** — Set `AI_PROVIDER` and the corresponding API key / model
+3. **Enable state persistence** — Use `RUNTIME_STATE_BACKEND=sqlite` for production
+4. **Deploy the container** — Docker, Docker Compose, Render, Railway, Fly.io, or K8s
+5. **Set webhook URL** on your platform:
+   - GitHub App: `https://<domain>/api/github/webhooks`
+   - GitHub Webhook: `https://<domain>/github/trigger`
+   - GitLab: `https://<domain>/gitlab/trigger`
+6. **Verify** via health endpoints and a test `/ai-review` comment
+
+### Quick Deployment Reference
+
+This is a compact deployment path for Render/Railway/Fly.io/Docker/K8s.
+
+1. **Choose mode**
+   - GitHub App (recommended)
+   - Plain GitHub Webhook
+   - Optional GitLab Webhook
+2. **Use minimal environment variables**
+
+**GitHub App minimum (`.env.github-app.min.example`)**
 
 ```env
 APP_ID=123456
 PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----\\n"
 WEBHOOK_SECRET=replace-with-webhook-secret
-# GITHUB_MERGED_DEDUPE_TTL_MS=86400000
-
 AI_PROVIDER=openai
 OPENAI_API_KEY=replace-with-openai-key
 OPENAI_MODEL=gpt-4.1-mini
 ```
 
-### 方案 B：普通 GitHub Webhook
+**Plain GitHub Webhook minimum (`.env.github-webhook.min.example`)**
 
 ```env
 GITHUB_WEBHOOK_SECRET=replace-with-webhook-secret
 GITHUB_WEBHOOK_TOKEN=replace-with-github-token
-GITHUB_MERGED_DEDUPE_TTL_MS=86400000
-
 AI_PROVIDER=openai
 OPENAI_API_KEY=replace-with-openai-key
 OPENAI_MODEL=gpt-4.1-mini
 ```
 
-### 单实例部署推荐（状态持久化 + 默认关闭 replay）
+**Recommended single-instance extras**
 
 ```env
 RUNTIME_STATE_BACKEND=sqlite
@@ -224,7 +584,7 @@ WEBHOOK_EVENT_STORE_ENABLED=false
 WEBHOOK_REPLAY_ENABLED=false
 ```
 
-### 排障时临时开启 replay（仅临时）
+**Temporary replay settings for debugging**
 
 ```env
 WEBHOOK_EVENT_STORE_ENABLED=true
@@ -232,46 +592,171 @@ WEBHOOK_REPLAY_ENABLED=true
 WEBHOOK_REPLAY_TOKEN=replace-with-strong-random-token
 ```
 
-可用接口：
+3. **Start application**
 
-- `GET /webhook/events`（列出已存储 webhook 事件）
+```bash
+npm install
+npm run build
+npm start
+```
+
+Server listens on `PORT` (default `3000`).
+
+4. **Configure webhook addresses**
+   - GitHub App: `https://<domain>/api/github/webhooks`
+   - GitHub Webhook: `https://<domain>/github/trigger`
+   - GitLab Webhook: `https://<domain>/gitlab/trigger`
+5. **GitLab recommended headers**
+   - `x-ai-mode: report|comment`
+   - `x-gitlab-api-token: <api token>`
+   - `x-gitlab-token: <webhook secret>` (only when `GITLAB_WEBHOOK_SECRET` is configured)
+6. **Docker one-liner**
+
+```bash
+docker build -t mr-agent:latest .
+docker run -d --name mr-agent -p 3000:3000 --env-file .env mr-agent:latest
+```
+
+7. **Verification checklist**
+   - `GET /health`
+   - `GET /github/health`
+   - `GET /gitlab/health`
+   - `GET /metrics`
+   - Test PR/MR commands: `/ai-review`, `/ai-review comment`
+   - Webhook failure response includes structured fields: `error/type/status/path/method/timestamp`
+
+If replay is enabled:
+- `GET /webhook/events`
 - `POST /github/replay/:eventId`
 - `POST /gitlab/replay/:eventId`
+- Header: `x-mr-agent-replay-token: <WEBHOOK_REPLAY_TOKEN>`
 
-以上接口需请求头：`x-mr-agent-replay-token: <WEBHOOK_REPLAY_TOKEN>`
+### Nginx Reverse Proxy
 
-### `GITHUB_MERGED_DEDUPE_TTL_MS`（推荐值与调参）
+There is no committed `deploy/nginx/` sample in this repository; use the snippet below as a baseline:
 
-- 作用：控制 GitHub `merged + report` 事件的去重窗口（单位毫秒），防止 webhook 重投时重复评审。
-- 推荐值：`86400000`（24 小时）。
-- 调大：如果你遇到较多 webhook 重试/Redeliver，或希望更强幂等，建议调到 `48h~72h`（如 `172800000` / `259200000`）。
-- 调小：如果你需要更快允许同一 PR 合并事件再次触发自动评审，可调到 `1h~6h`（如 `3600000` / `21600000`）。
-- 注意：该变量只影响 `merged + report` 自动触发；手动评论命令触发（`/ai-review ...`）仍使用短窗口去重策略。
+```nginx
+server {
+    listen 443 ssl;
+    server_name mr-agent.example.com;
 
-### `GITHUB_FEEDBACK_SIGNAL_TTL_MS`（反馈学习窗口）
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
 
-- 作用：控制评审反馈信号（`/feedback` + review thread resolved/unresolved）保留时长（毫秒）。
-- 推荐值：`2592000000`（30 天）。
-- 调大：团队评审节奏慢、希望长期记忆偏好，可设为 `60~90` 天。
-- 调小：规则变化快、希望更快“遗忘”历史偏好，可设为 `7~14` 天。
+---
 
-### GitLab 侧常用调参
+## Platform Integration
 
-- `GITLAB_MERGED_DEDUPE_TTL_MS`：`merged + report` 去重窗口（默认 24 小时）。
-- `GITLAB_INCREMENTAL_STATE_TTL_MS`：增量评审状态缓存窗口（默认 7 天）。
-- `GITLAB_FEEDBACK_SIGNAL_TTL_MS`：反馈学习信号保留窗口（默认 30 天）。
-- `GITLAB_POLICY_CONFIG_CACHE_TTL_MS`：`.mr-agent.yml` 策略缓存窗口（默认 5 分钟）。
-- `GITLAB_CHANGELOG_PATH`：`/changelog --apply` 写回路径（默认 `CHANGELOG.md`）。
-- `WEBHOOK_BODY_LIMIT`：Webhook 请求体大小上限（默认 `1mb`，超限返回 `413`）。
+### GitHub App (Recommended)
 
-更多变量见：`.env.example`
+1. Create a GitHub App with the following permissions:
+   - **Pull requests**: Read & write
+   - **Issues**: Read & write
+   - **Contents**: Read & write (required for `/changelog --apply`)
+   - **Checks**: Read & write (required for `mode=enforce`)
+   - **Metadata**: Read-only
+2. Subscribe to events:
+   - `Pull request` (`opened` / `edited` / `synchronize` / `closed`)
+   - `Issues` (`opened` / `edited`)
+   - `Issue comment`
+   - `Pull request review thread` (`resolved` / `unresolved`, for feedback learning)
+3. Set webhook URL to `https://<domain>/api/github/webhooks`
+4. Configure environment variables:
 
-## 仓库策略配置（`.mr-agent.yml`）
+```env
+APP_ID=123456
+PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
+WEBHOOK_SECRET=your-webhook-secret
+```
 
-在仓库根目录新增 `.mr-agent.yml`，可配置“仅提醒”或“强制失败检查”模式，并定义 Issue/PR 必填项：
+> If `APP_ID` + `PRIVATE_KEY` (+ `WEBHOOK_SECRET`) are not configured, GitHub App mode is automatically disabled; plain webhook mode remains available.
+
+### Plain GitHub Webhook
+
+1. In repo Settings > Webhooks, add `https://<domain>/github/trigger`
+2. Set content type to `application/json`
+3. Select events: `Pull requests`, `Issues`, `Issue comments`, `Pull request review threads`
+4. Configure:
+
+```env
+GITHUB_WEBHOOK_SECRET=your-secret
+GITHUB_WEBHOOK_TOKEN=ghp_...    # PAT with repo scope (falls back to GITHUB_TOKEN)
+```
+
+Optional debug-only switch:
+
+```env
+GITHUB_WEBHOOK_SKIP_SIGNATURE=false
+```
+
+> `GITHUB_WEBHOOK_SKIP_SIGNATURE=true` is rejected in production (`NODE_ENV=production`).
+
+### GitLab Webhook
+
+1. In project Settings > Webhooks, add `https://<domain>/gitlab/trigger`
+2. Select triggers:
+   - `Merge request events` (open / reopen / update / merge)
+   - `Note events` (for comment commands: `/ai-review`, `/ask`, `/checks`, `/describe`, `/generate_tests`, `/changelog`, `/improve`, `/add_doc`, `/reflect`, `/similar_issue`, `/feedback`)
+3. Optionally add secret token
+4. Configure:
+
+```env
+GITLAB_TOKEN=glpat-...
+GITLAB_WEBHOOK_SECRET=your-secret    # Optional
+GITLAB_REQUIRE_WEBHOOK_SECRET=false  # Optional hard-enforcement switch
+```
+
+GitLab-specific headers:
+- `x-ai-mode: report|comment` — override review mode
+- `x-gitlab-api-token: <token>` — per-request API token (recommended)
+- `x-gitlab-token` — webhook signature verification (only when `GITLAB_WEBHOOK_SECRET` is set)
+- `x-push-url` / `x-qwx-robot-url` — optional notification webhook override
+
+> **Compatibility**: When `GITLAB_WEBHOOK_SECRET` is not configured, `x-gitlab-token` is used as the API token instead of for signature verification.
+
+---
+
+## Commands
+
+All commands are triggered via PR/MR comments:
+
+| Command | Description |
+|---|---|
+| `/ai-review` | Trigger AI review (defaults to `report` when no mode is provided) |
+| `/ai-review report` | Force report mode (summary comment) |
+| `/ai-review comment` | Force comment mode (inline comments) |
+| `/ai-review --mode=report` / `--mode=comment` | Flag-style mode override (same effect as positional mode) |
+| `/ask <question>` | Ask about the PR code (multi-turn conversation) |
+| `/checks [question]` | Analyze CI check failures |
+| `/generate_tests [focus]` | Generate test code for changes |
+| `/changelog [focus]` | Generate changelog entry |
+| `/changelog --apply [focus]` | Generate and commit changelog to repo |
+| `/describe` | Generate PR/MR description |
+| `/describe --apply` | Generate and update PR/MR description |
+| `/improve [focus]` | Run review in improvement-only mode |
+| `/add_doc [focus]` / `/add-doc [focus]` | Generate documentation-only suggestions |
+| `/reflect [goal]` | Generate clarifying requirement/acceptance questions |
+| `/similar_issue [query]` / `/similar-issue [query]` | Search related issues in the same repository |
+| `/feedback resolved\|dismissed\|up\|down [note]` | Provide review quality feedback |
+
+Additional aliases are supported, for example: `/ai-review ask ...`, `/ai-review checks ...`, `/ai-review generate-tests ...`, `/ai-review add-doc ...`.
+Policy toggles in `.mr-agent.yml` exist for `/describe`, `/ask`, `/checks`, `/generate_tests`, `/changelog`, `/feedback`; `/reflect` depends on `askCommandEnabled`.
+
+---
+
+## Repository Policy
+
+Add `.mr-agent.yml` to the repository root to configure per-repo behavior:
 
 ```yaml
-mode: remind # remind | enforce
+mode: remind          # remind = comment only, enforce = fail GitHub Check
 
 issue:
   enabled: true
@@ -291,10 +776,10 @@ pullRequest:
 
 review:
   enabled: true
-  mode: comment # comment | report
-  onOpened: true
+  mode: comment         # comment | report
+  onOpened: true        # Review on PR open
   onEdited: false
-  onSynchronize: true
+  onSynchronize: true   # Review on new commits
   describeEnabled: true
   describeAllowApply: false
   checksCommandEnabled: true
@@ -306,102 +791,142 @@ review:
   feedbackCommandEnabled: true
   secretScanEnabled: true
   autoLabelEnabled: true
+  secretScanCustomPatterns:  # optional extra secret regex patterns
+    - "(?i)my_internal_token_[a-z0-9]{16,}"
   customRules:
-    - 所有公开 API 必须提供类型注释
-    - 不允许新增 any 类型
+    - All public APIs must have type annotations
+    - No new `any` types allowed
 ```
 
-说明：
+GitLab currently reads only the `review:` section from `.mr-agent.yml`. Top-level `mode`, `issue`, and `pullRequest` checks are enforced in GitHub policy flows.
 
-- `mode=remind`：仅评论提醒缺失项，不写失败检查。
-- `mode=enforce`：PR 预检不通过时写 GitHub Check 为 `failure`（默认检查名 `MR Agent Policy`）。
-- 未配置 `requiredSections` 时，会自动从仓库模板提取段落标题进行检查：
-  - Issue: `.github/ISSUE_TEMPLATE/*` 或 `.github/ISSUE_TEMPLATE.md`
-  - PR: `.github/pull_request_template.md` 或 `.github/PULL_REQUEST_TEMPLATE.md`
-- 若目标仓库没有上述模板，会回退到 MR Agent 内置默认模板段落（Issue: `Summary/Steps to Reproduce/Expected Behavior`；PR: `Summary/Test Plan/Related Issue`）。
-- `review` 段用于控制自动评审与描述命令：
-  - `enabled/mode/onOpened/onEdited/onSynchronize`：控制 PR 事件是否自动触发 AI 评审及模式。
-  - `describeEnabled`：控制 `/describe` 是否可用。
-  - `describeAllowApply`：控制 `/describe --apply` 是否允许直接改写 PR 描述。
-  - `checksCommandEnabled`：控制 `/checks` 是否可用。
-  - `askCommandEnabled`：控制 `/ask` 是否可用。
-  - `generateTestsCommandEnabled`：控制 `/generate_tests` 是否可用。
-  - `changelogCommandEnabled`：控制 `/changelog` 是否可用。
-  - `changelogAllowApply`：控制 `/changelog --apply` 是否允许直接写回仓库 changelog。
-  - `feedbackCommandEnabled`：控制 `/feedback` 是否可用。
-  - `includeCiChecks`：是否把 CI 检查结果带入 AI 上下文。
-  - `secretScanEnabled`：控制是否扫描 diff 中疑似密钥泄露并发布安全提示评论。
-  - `autoLabelEnabled`：控制是否根据变更内容自动追加 PR 标签。
-  - `customRules`：团队自定义评审规则（自然语言），在评审与问答中都会强制纳入。
+**Modes:**
+- `remind` — posts a comment noting missing fields; does not block merge
+- `enforce` — creates a failing GitHub Check (`MR Agent Policy`) that can be required in branch protection rules
 
-## 多 Provider 配置示例
+**Template fallback behavior:**
+- When `requiredSections` is not configured, section headings are automatically extracted from repository templates:
+  - Issue: `.github/ISSUE_TEMPLATE/*` or `.github/ISSUE_TEMPLATE.md`
+  - PR: `.github/pull_request_template.md` or `.github/PULL_REQUEST_TEMPLATE.md`
+- If no templates exist, built-in defaults are used (Issue: `Summary / Steps to Reproduce / Expected Behavior`; PR: `Summary / Test Plan / Related Issue`).
 
-### OpenAI-compatible
+**Review field reference:**
+
+| Field | Description |
+|---|---|
+| `enabled` / `mode` | Enable AI review and set default mode (comment / report) |
+| `onOpened` / `onEdited` / `onSynchronize` | Control which PR events auto-trigger review |
+| `describeEnabled` | Enable `/describe` command |
+| `describeAllowApply` | Allow `/describe --apply` to directly update PR description |
+| `checksCommandEnabled` | Enable `/checks` command |
+| `includeCiChecks` | Include CI check results in AI context |
+| `askCommandEnabled` | Enable `/ask` command |
+| `generateTestsCommandEnabled` | Enable `/generate_tests` command |
+| `changelogCommandEnabled` | Enable `/changelog` command |
+| `changelogAllowApply` | Allow `/changelog --apply` to commit directly to the repo |
+| `feedbackCommandEnabled` | Enable `/feedback` command |
+| `secretScanEnabled` | Scan diffs for potential secret leaks and post security warnings |
+| `secretScanCustomPatterns` | Additional repository-specific secret regex patterns |
+| `autoLabelEnabled` | Auto-add PR labels based on change content |
+| `customRules` | Team-specific review rules (natural language); enforced in both reviews and Q&A |
+
+---
+
+## Observability
+
+### Metrics
+
+Prometheus-format metrics are exposed at `GET /metrics`:
+
+- `mr_agent_webhook_requests_total` — webhook request count by platform & event
+- `mr_agent_webhook_results_total` — results by platform & outcome (ok/error)
+- `mr_agent_webhook_replay_total` — replay execution outcomes
+- `mr_agent_webhook_store_writes_total` — persisted debug-event write count
+- `mr_agent_webhook_store_trim_total` — debug-event store trim operations
+- `mr_agent_health_checks_total` — health endpoint call count
+- `mr_agent_http_errors_total` — global HTTP error count
+- `mr_agent_process_uptime_seconds` — process uptime
+- `mr_agent_ai_requests_active` — active AI request count
+- `mr_agent_ai_wait_queue_size` — queued AI request count
+- `mr_agent_ai_shutdown_requested` — AI shutdown flag (0/1)
+- `mr_agent_runtime_state_backend_info{backend=...}` — selected runtime-state backend info gauge
+
+### Health Checks
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Liveness probe |
+| `GET /health?deep=true` | Deep check (AI provider connectivity) |
+| `GET /github/health` | GitHub webhook config validation |
+| `GET /gitlab/health` | GitLab webhook config validation |
+
+### Error Handling
+
+Webhook errors return structured JSON:
+
+```json
+{
+  "ok": false,
+  "error": "Detailed error message",
+  "type": "BadWebhookRequestError",
+  "status": 400,
+  "path": "/github/trigger",
+  "method": "POST",
+  "timestamp": "2026-01-01T00:00:00.000Z"
+}
+```
+
+Payloads exceeding `WEBHOOK_BODY_LIMIT` (default `1mb`) return `413 Payload Too Large`.
+
+### Webhook Replay (Debug)
+
+Enable temporarily for debugging:
 
 ```env
-AI_PROVIDER=openai-compatible
-OPENAI_BASE_URL=https://your-compatible-endpoint/v1
-OPENAI_COMPATIBLE_API_KEY=replace-with-compatible-key
-OPENAI_COMPATIBLE_MODEL=deepseek-chat
+WEBHOOK_EVENT_STORE_ENABLED=true
+WEBHOOK_REPLAY_ENABLED=true
+WEBHOOK_REPLAY_TOKEN=your-secret-token
 ```
 
-### Anthropic
+Endpoints (require `x-mr-agent-replay-token` header):
+- `GET /webhook/events` — list stored events
+- `POST /github/replay/:eventId` — replay a GitHub event
+- `POST /gitlab/replay/:eventId` — replay a GitLab event
 
-```env
-AI_PROVIDER=anthropic
-ANTHROPIC_API_KEY=replace-with-anthropic-key
-ANTHROPIC_MODEL=claude-3-5-haiku-latest
-ANTHROPIC_MAX_TOKENS=8192
-```
+### Resilience
 
-### Gemini
+- **HTTP Retry**: exponential backoff (2 retries, 400ms base delay) on 408/429/5xx
+- **Deduplication**: FNV hash with 5-min window (24h for merged events)
+- **Rate Limiting**: per-scope limits to prevent API abuse
+- **Graceful Shutdown**: drains in-flight requests on SIGTERM/SIGINT
 
-```env
-AI_PROVIDER=gemini
-GEMINI_API_KEY=replace-with-gemini-key
-GEMINI_MODEL=gemini-2.0-flash
-```
+---
 
-## Docker 部署
+## Testing
 
 ```bash
-docker build -t mr-agent:latest .
-docker run -d --name mr-agent -p 3000:3000 --env-file .env mr-agent:latest
+# Run tests
+npm test
+
+# Run with coverage
+npm run test:coverage
+
+# Type check only
+npm run check
 ```
 
-## 项目结构
+Tests use the Node.js built-in test runner (`node:test`). Coverage includes:
+- AI concurrency control
+- Cache & dedup behavior
+- Diff parsing & hunk prioritization
+- GitHub/GitLab integration logic
+- HTTP retry & error handling
+- Policy validation
+- Notification adapters
+- NestJS module wiring
 
-经典 NestJS 分层（Controller / Service / Module）：
+---
 
-- `src/main.ts`: 启动入口
-- `src/app.module.ts`: 根模块
-- `src/app.controller.ts`: 全局健康检查路由
-- `src/app.service.ts`: 全局服务
-- `src/common/filters/http-error.filter.ts`: 全局异常过滤器
-- `src/modules/github/github.webhook.controller.ts`: GitHub 普通 Webhook 控制器
-- `src/modules/github/github.webhook.service.ts`: GitHub 普通 Webhook 服务
-- `src/modules/gitlab/gitlab.webhook.controller.ts`: GitLab Webhook 控制器
-- `src/modules/gitlab/gitlab.webhook.service.ts`: GitLab Webhook 服务
-- `src/modules/github-app/github-app.bootstrap.service.ts`: GitHub App webhook 挂载
-- `src/app.ts`: Probot GitHub App 事件处理
-- `src/core/*`: 通用基础能力（错误模型、HTTP 重试、去重）
-- `src/review/*`: 评审领域能力（模型调用、diff 行号、报告渲染、类型）
-- `src/integrations/github/*`: GitHub 评审与普通 webhook 适配
-- `src/integrations/gitlab/*`: GitLab 评审流程
-- `src/integrations/notify/*`: 外部通知推送
+## License
 
-### 路径别名
-
-已启用 Node ESM + TS 路径别名（含运行时 `package.json#imports`）：
-
-- `#core`
-- `#review`
-- `#integrations/github`
-- `#integrations/gitlab`
-- `#integrations/notify`
-
-## 参考环境模板
-
-- `.env.example`
-- `.env.github-app.min.example`
-- `.env.github-webhook.min.example`
+Private — see repository for details.
