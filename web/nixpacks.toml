@@ -7,7 +7,7 @@ nixPkgs = ["nodejs_22", "pnpm"]
 cmds = ["pnpm install --frozen-lockfile"]
 
 [phases.build]
-cmds = ["pnpm run web:build"]
+cmds = ["pnpm build"]
 
 [start]
-cmds = ["pnpm run web:start"]
+cmds = ["pnpm start"]
