@@ -10,7 +10,7 @@
   min-height: 100vh;
   overflow-x: hidden;
   position: relative;
-  width: 100vw;
+  width: 100%;
 }
 
 .cornerPiece {
@@ -157,6 +157,18 @@
   color: #ffffff;
 }
 
+.navLinkExternal {
+  background: #111111;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.navLinkExternal:hover,
+.navLinkExternal:focus-visible {
+  background: #2a2a2a;
+  color: #ffffff;
+}
+
 .pixelLayer {
   inset: 0;
   overflow: hidden;
@@ -207,29 +219,35 @@
 .heroCard {
   margin-left: 80px;
   margin-top: 80px;
-  max-width: 620px;
+  max-width: 680px;
 }
 
 .projectsCard {
-  margin-left: 240px;
-  width: calc(100% - 320px);
+  margin-left: 220px;
+  width: calc(100% - 300px);
 }
 
 .methodCard {
   margin-left: 40px;
-  max-width: 420px;
+  max-width: 540px;
 }
 
 .sectionCard {
   margin-left: 80px;
   margin-top: 80px;
-  max-width: 760px;
+  max-width: 980px;
+}
+
+.mermaidSection {
+  margin-left: 80px;
+  max-width: none;
+  width: calc(100% - 160px);
 }
 
 .contactCard {
   margin-left: 80px;
   margin-top: 80px;
-  max-width: 560px;
+  max-width: 980px;
 }
 
 .pixelLogo {
@@ -244,6 +262,14 @@
 .pixelLogoCell {
   height: 10px;
   width: 10px;
+}
+
+.pixelLogoCellFilled {
+  background: #000000;
+}
+
+.pixelLogoCellEmpty {
+  background: transparent;
 }
 
 .cardMeta {
@@ -267,20 +293,29 @@
   text-transform: uppercase;
 }
 
+.subSectionTitle {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  line-height: 20px;
+  margin: 22px 0 0;
+  text-transform: uppercase;
+}
+
 .cardDisplayTitle {
   font-size: 32px;
   font-weight: 400;
   letter-spacing: -0.5px;
   line-height: 40px;
   margin: 0 0 20px;
-  max-width: 800px;
+  max-width: 900px;
 }
 
 .cardBodyText {
   font-size: 14px;
   line-height: 20px;
   margin: 0 0 20px;
-  max-width: 60ch;
+  max-width: 72ch;
 }
 
 .cardMonoLink {
@@ -293,15 +328,38 @@
   margin: 0;
 }
 
-.twoColumnInfo {
+.pillRow {
   display: flex;
-  gap: 24px;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 24px;
 }
 
-.agencyMetrics {
-  display: flex;
-  gap: 40px;
-  margin-top: 8px;
+.pill {
+  background: #111111;
+  border: 1px solid #111111;
+  color: #ffffff;
+  display: inline-flex;
+  font-family:
+    "Courier New",
+    Courier,
+    monospace;
+  font-size: 11px;
+  line-height: 1;
+  padding: 7px 9px;
+  text-transform: uppercase;
+}
+
+.metaGrid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.metaCard {
+  background: #f8f8f8;
+  border: 1px solid #d4d4d4;
+  padding: 12px;
 }
 
 .metricValue {
@@ -320,7 +378,7 @@
 .tableRow {
   border-bottom: 1px solid #dcdcdc;
   display: grid;
-  grid-template-columns: 3fr 1fr 2fr;
+  grid-template-columns: 2fr 3fr 2fr;
 }
 
 .tableRow:hover {
@@ -344,10 +402,11 @@
 }
 
 .tableCell {
-  align-items: center;
+  align-items: flex-start;
   border-right: 1px solid #dcdcdc;
   display: flex;
   font-size: 13px;
+  line-height: 18px;
   min-height: 40px;
   padding: 10px;
 }
@@ -361,88 +420,186 @@
     "Courier New",
     Courier,
     monospace;
+  font-size: 12px;
 }
 
-.contactForm {
+.bulletList {
   display: grid;
-  gap: 6px;
+  gap: 8px;
+  margin: 0;
+  padding-left: 18px;
 }
 
-.formLabel {
-  color: #666666;
+.bulletList li {
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.codeBlock {
+  background: #0f0f0f;
+  border: 1px solid #0f0f0f;
+  color: #f5f5f5;
   font-family:
     "Courier New",
     Courier,
     monospace;
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 18px;
+  margin: 20px 0 0;
+  overflow-x: auto;
+  padding: 12px;
+  white-space: pre;
+}
+
+.inlineCode {
+  background: #e8e8e8;
+  border: 1px solid #d2d2d2;
+  padding: 1px 5px;
+}
+
+.linkList {
+  display: grid;
+  gap: 14px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.externalLink {
+  color: #ffffff;
+  display: inline-flex;
+  background: #111111;
+  border: 1px solid #111111;
+  font-family:
+    "Courier New",
+    Courier,
+    monospace;
+  font-size: 13px;
+  letter-spacing: 0.3px;
+  padding: 8px 10px;
+  text-decoration: none;
   text-transform: uppercase;
 }
 
-.formInput {
-  background: #f0f0f0;
-  border: 1px solid #000000;
-  display: block;
-  font-family:
-    "Helvetica Neue",
-    Helvetica,
-    Arial,
-    sans-serif;
-  font-size: 13px;
-  outline: none;
-  padding: 8px 10px;
-  width: 100%;
+.externalLink:hover,
+.externalLink:focus-visible {
+  background: #2a2a2a;
 }
 
-.formTextarea {
-  min-height: 120px;
-  resize: vertical;
+.linkNote {
+  color: #666666;
+  font-size: 12px;
+  line-height: 18px;
+  margin: 6px 0 0;
 }
 
-.formError {
-  color: #c1121f;
-  font-family:
-    "Courier New",
-    Courier,
-    monospace;
-  font-size: 11px;
-  margin-bottom: 4px;
+.opsGrid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 16px;
 }
 
-.formSubmit {
-  background: #000000;
-  border: 1px solid #000000;
+.opsPanel {
+  background: #f9f9f9;
+  border: 1px solid #d6d6d6;
+  padding: 14px;
+}
+
+.panelTitle {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  margin: 0 0 10px;
+  text-transform: uppercase;
+}
+
+.mermaidPanel {
+  background: #ffffff;
+  border: 1px solid #d6d6d6;
+  margin-top: 12px;
+  padding: 8px;
+}
+
+.mermaidToolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.mermaidToolButton {
+  background: #111111;
+  border: 1px solid #111111;
   color: #ffffff;
   cursor: crosshair;
-  font-size: 12px;
-  letter-spacing: 0.5px;
-  margin-top: 10px;
-  padding: 8px 20px;
-  text-transform: uppercase;
-  width: fit-content;
-}
-
-.contactSuccess {
-  background: #ffffff;
-  border: 1px solid #000000;
   font-family:
     "Courier New",
     Courier,
     monospace;
-  font-size: 13px;
-  padding: 20px;
+  font-size: 12px;
+  line-height: 1;
+  min-width: 34px;
+  padding: 8px 10px;
 }
 
-.contactSuccess p {
-  margin: 0;
+.mermaidToolButton:hover,
+.mermaidToolButton:focus-visible {
+  background: #2a2a2a;
 }
 
-.contactSuccess p:first-child {
-  font-weight: 700;
-  margin-bottom: 10px;
+.mermaidZoomText {
+  font-family:
+    "Courier New",
+    Courier,
+    monospace;
+  font-size: 12px;
+  margin: 0 6px 0 2px;
 }
 
-.contactSuccess p:last-child {
-  color: #666666;
+.mermaidViewport {
+  background: #fafafa;
+  border: 1px solid #e2e2e2;
+  overflow: auto;
+  padding: 10px;
+}
+
+.mermaidCanvas {
+  transform-origin: top left;
+}
+
+.mermaidHost {
+  min-width: 1400px;
+}
+
+.mermaidHost :global(svg) {
+  display: block;
+  height: auto;
+  max-width: 100%;
+}
+
+.mermaidError {
+  color: #b42318;
+  font-family:
+    "Courier New",
+    Courier,
+    monospace;
+  font-size: 12px;
+  line-height: 18px;
+  margin: 10px 0 0;
+}
+
+@media (max-width: 1200px) {
+  .projectsCard {
+    margin-left: 80px;
+    width: calc(100% - 120px);
+  }
+
+  .sectionCard,
+  .contactCard {
+    max-width: 100%;
+  }
 }
 
 @media (max-width: 960px) {
@@ -465,17 +622,28 @@
   .projectsCard,
   .methodCard,
   .sectionCard,
-  .contactCard {
+  .contactCard,
+  .mermaidSection {
     margin-left: 0;
     margin-top: 20px;
     max-width: 100%;
     width: 100%;
   }
 
+  .metaGrid,
+  .opsGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .tableHeader,
+  .tableRow {
+    grid-template-columns: 1.2fr 2fr 1.2fr;
+  }
+
   .nav {
     bottom: 16px;
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     left: 20px;
     right: 20px;
     top: auto;
@@ -487,9 +655,13 @@
     min-width: 0;
     overflow: hidden;
     padding: 0 4px;
+    text-align: center;
     text-overflow: ellipsis;
     white-space: nowrap;
-    text-align: center;
+  }
+
+  .mermaidHost {
+    min-width: 980px;
   }
 
   .navLink:last-child {
@@ -499,15 +671,5 @@
   .cardDisplayTitle {
     font-size: 26px;
     line-height: 34px;
-  }
-
-  .twoColumnInfo {
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .agencyMetrics {
-    flex-wrap: wrap;
-    gap: 20px;
   }
 }

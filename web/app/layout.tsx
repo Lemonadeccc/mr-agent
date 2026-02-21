@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "PR Agent | Coordinate Studio",
+  title: "PR Agent | AI Code Review Service",
   description:
-    "PR Agent official website prototype built with Next.js App Router.",
+    "PR Agent official website showcasing AI-powered code review workflows for GitHub and GitLab.",
   icons: {
     icon: [
       { url: "/icon.svg", type: "image/svg+xml" },

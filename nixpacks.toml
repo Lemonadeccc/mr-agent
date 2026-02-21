@@ -1,0 +1,13 @@
+providers = ["node"]
+
+[phases.setup]
+nixPkgs = ["nodejs_22", "pnpm"]
+
+[phases.install]
+cmds = ["pnpm install --frozen-lockfile"]
+
+[phases.build]
+cmds = ["pnpm run web:build"]
+
+[start]
+cmds = ["pnpm run web:start"]
